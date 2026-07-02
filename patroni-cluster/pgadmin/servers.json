@@ -1,0 +1,34 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Patroni Cluster (via haproxy)",
+      "Group": "Servers",
+      "Host": "haproxy",
+      "Port": 5432,
+      "MaintenanceDB": "shop",
+      "Username": "postgres",
+      "Password": "secret",
+      "SSLMode": "prefer"
+    },
+    "2": {
+      "Name": "Physical Replica",
+      "Group": "Servers",
+      "Host": "pg-physical-replica",
+      "Port": 5432,
+      "MaintenanceDB": "shop",
+      "Username": "postgres",
+      "Password": "secret",
+      "SSLMode": "prefer"
+    },
+    "3": {
+      "Name": "Logical Replica",
+      "Group": "Servers",
+      "Host": "pg-logical-replica",
+      "Port": 5432,
+      "MaintenanceDB": "shop",
+      "Username": "postgres",
+      "Password": "secret",
+      "SSLMode": "prefer"
+    }
+  }
+}

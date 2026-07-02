@@ -1,0 +1,84 @@
+digraph G {
+    rankdir=LR;
+    splines=true;
+    nodesep=0.5;
+    ranksep=0.7;
+    bgcolor="#f8f9fa";
+    fontname="Arial";
+    fontsize=11;
+
+    node [shape=box, style=filled, fillcolor="white", fontname="Arial", fontsize=10];
+    edge [fontname="Arial", fontsize=9];
+
+    subgraph cluster_dcs {
+        label="DCS (etcd)";
+        style=dashed;
+        fillcolor="#e3f2fd";
+        color="#1565c0";
+        fontcolor="#1565c0";
+        fontsize=12;
+
+        etcd [label="etcd\nv3.5.15\n:2379", fillcolor="#bbdefb", shape=cylinder];
+    }
+
+    subgraph cluster_patroni {
+        label="Patroni Cluster (PostgreSQL 17)";
+        style=dashed;
+        fillcolor="#e8f5e9";
+        color="#2e7d32";
+        fontcolor="#2e7d32";
+        fontsize=12;
+
+        patroni1 [label="patroni1\nPostgreSQL 17\nREST API :8008", fillcolor="#c8e6c9"];
+        patroni2 [label="patroni2\nPostgreSQL 17\nREST API :8008", fillcolor="#c8e6c9"];
+        patroni3 [label="patroni3\nPostgreSQL 17\nREST API :8008", fillcolor="#c8e6c9"];
+    }
+
+    subgraph cluster_proxy {
+        label="Proxy / Admin";
+        style=dashed;
+        fillcolor="#fff3e0";
+        color="#e65100";
+        fontcolor="#e65100";
+        fontsize=12;
+
+        haproxy [label="HAProxy\n:5432 R/W\nstats :7000", fillcolor="#ffe0b2", shape=cds];
+        pgadmin [label="pgAdmin 4\nWeb UI :80", fillcolor="#ffe0b2"];
+    }
+
+    subgraph cluster_replicas {
+        label="External Replicas";
+        style=dashed;
+        fillcolor="#f3e5f5";
+        color="#6a1b9a";
+        fontcolor="#6a1b9a";
+        fontsize=12;
+
+        physical [label="pg-physical-replica\nPostgreSQL 17\nStreaming Replica\n:5433", fillcolor="#e1bee7"];
+        logical [label="pg-logical-replica\nPostgreSQL 17\nLogical Replica\n:5434", fillcolor="#e1bee7"];
+    }
+
+    etcd -> patroni1 [label=" leader election", style=dotted, color="#1565c0"];
+    etcd -> patroni2 [label=" leader election", style=dotted, color="#1565c0"];
+    etcd -> patroni3 [label=" leader election", style=dotted, color="#1565c0"];
+
+    patroni1 -> haproxy [label=" REST /master", style=dotted, color="#e65100"];
+    patroni2 -> haproxy [label=" REST /master", style=dotted, color="#e65100"];
+    patroni3 -> haproxy [label=" REST /master", style=dotted, color="#e65100"];
+
+    haproxy -> patroni1 [label=" R/W queries", dir=both, color="#2e7d32"];
+    haproxy -> patroni2 [label=" R/W queries", dir=both, color="#2e7d32"];
+    haproxy -> patroni3 [label=" R/W queries", dir=both, color="#2e7d32"];
+
+    haproxy -> physical [label=" pg_basebackup\n streaming WAL", style=bold, color="#6a1b9a"];
+    physical -> haproxy [label=" WAL stream", style=bold, dir=none, color="#6a1b9a"];
+
+    haproxy -> logical [label=" logical replication\n pgoutput plugin", style=bold, color="#6a1b9a"];
+    logical -> haproxy [label=" subscription sync", style=bold, dir=none, color="#6a1b9a"];
+
+    user [label="Client Apps", shape=plaintext, fontsize=12, fontcolor="gray20"];
+    user -> haproxy [label=" :5432", color="#e65100"];
+
+    admin [label="Admin\nBrowser", shape=plaintext, fontsize=12, fontcolor="gray20"];
+    admin -> pgadmin [label=" :80", color="#e65100"];
+}

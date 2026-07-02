@@ -1,0 +1,290 @@
+# ═══════════════════════════════════════════════════════════════
+# Patroni-кластер PostgreSQL 17
+# - 3 узла Patroni (автоматический failover)
+# - HAProxy (единая точка входа на мастер)
+# - Физическая (streaming) реплика через WAL
+# - Логическая реплика через publication/subscription
+# - pgAdmin для веб-управления
+# ═══════════════════════════════════════════════════════════════
+services:
+
+  # ─── etcd: распределённое хранилище (DCS) для Patroni ───
+  # Хранит конфигурацию кластера, координаты лидера, слоты репликации
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.15
+    command:
+      - etcd
+      - --name=etcd0
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=etcd0=http://etcd:2380
+      - --initial-cluster-token=patroni-etcd
+      - --initial-cluster-state=new
+      - --enable-v2=true       # Patroni использует etcd v2 API
+    ports:
+      - "2379:2379"
+    networks:
+      - patroni-net
+
+  # ─── Узлы Patroni (patroni1, patroni2, patroni3) ───
+  # Patroni управляет PostgreSQL: выбирает лидера, переключает при отказе,
+  # обновляет конфигурацию через REST API (порт 8008)
+  # Каждый узел — полноценный сервер PostgreSQL под управлением Patroni.
+  # После bootstrap лидера выполняется post_bootstrap (/scripts/init.sh).
+  patroni1:
+    build: ./patroni
+    environment:
+      # PATRONI_CONFIGURATION — полная конфигурация Patroni в YAML
+      PATRONI_CONFIGURATION: |
+        scope: patroni_cluster                    # Имя кластера
+        name: patroni1                             # Имя узла — уникально для каждого
+        restapi:
+          listen: 0.0.0.0:8008
+          connect_address: patroni1:8008           # Адрес для HAProxy health-check
+        postgresql:
+          listen: 0.0.0.0:5432
+          connect_address: patroni1:5432
+          data_dir: /data/pgdata                   # data_directory PostgreSQL
+          authentication:
+            superuser:
+              username: postgres
+              password: secret
+            replication:
+              username: replicator                 # Пользователь для репликации
+              password: replicator
+          pg_hba:
+            - local all all trust
+            - host all all 127.0.0.1/32 trust
+            - host all all ::1/128 trust
+            - host all all 0.0.0.0/0 md5            # md5 для удалённых подключений
+            - host replication replicator 0.0.0.0/0 md5  # Доступ для репликации
+        bootstrap:
+          dcs:                                      # Настройки DCS (etcd)
+            ttl: 30
+            loop_wait: 10
+            retry_timeout: 10
+            maximum_lag_on_failover: 1048576        # Макс. лаг для failover (1 ГБ)
+            master_start_timeout: 300
+            synchronous_mode: false                 # Асинхронная репликация
+            postgresql:
+              use_pg_rewind: true                   # Позволяет вернуть бывшего лидера в кластер
+              parameters:
+                wal_level: logical                  # Нужен для логической репликации
+                max_worker_processes: 8
+            slots:
+              shop_sub:                             # Permanent logical replication slot
+                type: logical                       # Гарантирует, что после failover
+                database: shop                      # логическая реплика не потеряет
+                plugin: pgoutput                    # соединение — слот сохраняется на новом лидере
+          post_bootstrap: /scripts/init.sh          # Скрипт первичной настройки (БД, таблицы, publication)
+        etcd:
+          hosts: etcd:2379
+    volumes:
+      - ./data/pgdata1:/data                        # Данные PostgreSQL и Patroni
+    networks:
+      - patroni-net
+    depends_on:
+      - etcd
+
+  patroni2:
+    build: ./patroni
+    environment:
+      PATRONI_CONFIGURATION: |
+        scope: patroni_cluster
+        name: patroni2
+        restapi:
+          listen: 0.0.0.0:8008
+          connect_address: patroni2:8008
+        postgresql:
+          listen: 0.0.0.0:5432
+          connect_address: patroni2:5432
+          data_dir: /data/pgdata
+          authentication:
+            superuser:
+              username: postgres
+              password: secret
+            replication:
+              username: replicator
+              password: replicator
+          pg_hba:
+            - local all all trust
+            - host all all 127.0.0.1/32 trust
+            - host all all ::1/128 trust
+            - host all all 0.0.0.0/0 md5
+            - host replication replicator 0.0.0.0/0 md5
+        bootstrap:
+          dcs:
+            ttl: 30
+            loop_wait: 10
+            retry_timeout: 10
+            maximum_lag_on_failover: 1048576
+            master_start_timeout: 300
+            synchronous_mode: false
+            postgresql:
+              use_pg_rewind: true
+              parameters:
+                wal_level: logical
+                max_worker_processes: 8
+            slots:
+              shop_sub:
+                type: logical
+                database: shop
+                plugin: pgoutput
+          post_bootstrap: /scripts/init.sh
+        etcd:
+          hosts: etcd:2379
+    volumes:
+      #- pgdata2:/data
+      - ./data/pgdata2:/data
+    networks:
+      - patroni-net
+    depends_on:
+      - etcd
+
+  patroni3:
+    build: ./patroni
+    environment:
+      PATRONI_CONFIGURATION: |
+        scope: patroni_cluster
+        name: patroni3
+        restapi:
+          listen: 0.0.0.0:8008
+          connect_address: patroni3:8008
+        postgresql:
+          listen: 0.0.0.0:5432
+          connect_address: patroni3:5432
+          data_dir: /data/pgdata
+          authentication:
+            superuser:
+              username: postgres
+              password: secret
+            replication:
+              username: replicator
+              password: replicator
+          pg_hba:
+            - local all all trust
+            - host all all 127.0.0.1/32 trust
+            - host all all ::1/128 trust
+            - host all all 0.0.0.0/0 md5
+            - host replication replicator 0.0.0.0/0 md5
+        bootstrap:
+          dcs:
+            ttl: 30
+            loop_wait: 10
+            retry_timeout: 10
+            maximum_lag_on_failover: 1048576
+            master_start_timeout: 300
+            synchronous_mode: false
+            postgresql:
+              use_pg_rewind: true
+              parameters:
+                wal_level: logical
+                max_worker_processes: 8
+            slots:
+              shop_sub:
+                type: logical
+                database: shop
+                plugin: pgoutput
+          post_bootstrap: /scripts/init.sh
+        etcd:
+          hosts: etcd:2379
+    volumes:
+      #- pgdata3:/data
+      - ./data/pgdata3:/data
+    networks:
+      - patroni-net
+    depends_on:
+      - etcd
+
+  # ─── Физическая (streaming) реплика ───
+  # Полная копия данных мастера через pg_basebackup.
+  # Стримит WAL через HAProxy (настоящий мастер неизвестен — HAProxy сам направляет).
+  # Не требует DDL на реплике — все изменения приходят через WAL автоматически.
+  # Доступна на порту 5433 хоста.
+  pg-physical-replica:
+    build: ./replica-physical
+    environment:
+      POSTGRES_PASSWORD: secret          # Пароль локального superuser (postgres) на реплике
+      PGPASSWORD: replicator             # Пароль replicator — для pg_basebackup через HAProxy
+      PGDATA: /var/lib/postgresql/data   # data_directory реплики (НЕ совпадает с Patroni /data/pgdata)
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./data/pg_physical:/var/lib/postgresql/data
+    networks:
+      - patroni-net
+    depends_on:
+      - haproxy                         # Ждём HAProxy — pg_basebackup идёт через него
+
+  # ─── Логическая реплика ───
+  # Подписывается на publication shop_pub через subscription shop_sub.
+  # Копирует только выбранные таблицы (users, products, orders).
+  # ВАЖНО: DDL на мастере требует ручного DDL на логической реплике (иначе подписка ломается).
+  # Слот shop_sub — permanent (создаётся Patroni в DCS), поэтому create_slot = false.
+  # Доступна на порту 5434 хоста.
+  pg-logical-replica:
+    build: ./replica-logical
+    environment:
+      POSTGRES_PASSWORD: secret          # Пароль локального superuser
+      PGPASSWORD: secret                 # Пароль для подключения к мастеру через HAProxy (user=postgres)
+    ports:
+      - "5434:5432"
+    volumes:
+      - ./data/pg_logical:/var/lib/postgresql/data
+    networks:
+      - patroni-net
+    depends_on:
+      - haproxy                          # Ждём HAProxy — подключение к мастеру через него
+      - patroni1
+      - patroni2
+      - patroni3
+
+  # ─── HAProxy: балансировщик и единая точка входа ───
+  # - Порт 5432: все клиентские подключения (автоматически направляются на мастер)
+  # - Порт 7000: статистика (health check, статус узлов)
+  # Health-check: GET /master на порт 8008 Patroni → если ответ 200, узел — лидер
+  # failover прозрачен для клиентов — HAProxy сам переключается на нового лидера
+  haproxy:
+    image: haproxy:lts-alpine
+    ports:
+      - "5432:5432"
+      - "7000:7000"
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - patroni-net
+    depends_on:
+      - patroni1
+      - patroni2
+      - patroni3
+
+  # ─── pgAdmin: веб-интерфейс управления ───
+  # Предварительно настроенные серверы (patroni1-3, реплики) — в servers.json
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"       # Desktop-режим (один пользователь)
+    ports:
+      - "80:80"
+    volumes:
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
+      - ./data/pgadmin:/var/lib/pgadmin
+    networks:
+      - patroni-net
+    depends_on:
+      - haproxy
+
+#volumes:
+#  pgdata1:
+#  pgdata2:
+#  pgdata3:
+#  pg_physical:
+#  pg_logical:
+
+networks:
+  patroni-net:
+    driver: bridge
