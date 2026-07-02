@@ -78,6 +78,10 @@ services:
                 type: logical                       # Гарантирует, что после failover
                 database: shop                      # логическая реплика не потеряет
                 plugin: pgoutput                    # соединение — слот сохраняется на новом лидере
+              audit_slot:                           # Слот для WAL-consumer (pg-audit)
+                type: logical
+                database: shop
+                plugin: pgoutput
           post_bootstrap: /scripts/init.sh          # Скрипт первичной настройки (БД, таблицы, publication)
         etcd:
           hosts: etcd:2379
@@ -129,6 +133,10 @@ services:
                 max_worker_processes: 8
             slots:
               shop_sub:
+                type: logical
+                database: shop
+                plugin: pgoutput
+              audit_slot:
                 type: logical
                 database: shop
                 plugin: pgoutput
@@ -187,6 +195,10 @@ services:
                 type: logical
                 database: shop
                 plugin: pgoutput
+              audit_slot:
+                type: logical
+                database: shop
+                plugin: pgoutput
           post_bootstrap: /scripts/init.sh
         etcd:
           hosts: etcd:2379
@@ -240,6 +252,44 @@ services:
       - patroni1
       - patroni2
       - patroni3
+
+  # ─── Аудит-лог (WAL consumer) ───
+  # Принимает изменения через WAL-консьюмер (Java 17) и пишет в свою БД
+  # в формате append-only: каждая операция (INSERT/UPDATE/DELETE) → новая строка
+  # Доступен на порту 5435 хоста.
+  pg-audit-log:
+    build: ./pg-audit-log
+    environment:
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5435:5432"
+    volumes:
+      - ./data/pg_auditlog:/var/lib/postgresql/data
+    networks:
+      - patroni-net
+    depends_on:
+      - haproxy
+
+  pg-audit-consumer:
+    build: ./pg-audit-consumer
+    environment:
+      SOURCE_HOST: haproxy
+      SOURCE_PORT: 5432
+      SOURCE_DB: shop
+      SOURCE_USER: postgres
+      SOURCE_PASSWORD: secret
+      SLOT_NAME: audit_slot
+      PUBLICATION_NAME: shop_pub
+      TARGET_HOST: pg-audit-log
+      TARGET_PORT: 5432
+      TARGET_DB: shop
+      TARGET_USER: postgres
+      TARGET_PASSWORD: secret
+    networks:
+      - patroni-net
+    depends_on:
+      - haproxy
+      - pg-audit-log
 
   # ─── HAProxy: балансировщик и единая точка входа ───
   # - Порт 5432: все клиентские подключения (автоматически направляются на мастер)

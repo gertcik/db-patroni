@@ -29,6 +29,16 @@
       "Username": "postgres",
       "Password": "secret",
       "SSLMode": "prefer"
+    },
+    "4": {
+      "Name": "Audit DB (pg-audit-log)",
+      "Group": "Servers",
+      "Host": "pg-audit-log",
+      "Port": 5432,
+      "MaintenanceDB": "shop",
+      "Username": "postgres",
+      "Password": "secret",
+      "SSLMode": "prefer"
     }
   }
 }

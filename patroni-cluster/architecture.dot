@@ -58,6 +58,18 @@ digraph G {
         logical [label="pg-logical-replica\nPostgreSQL 17\nLogical Replica\n:5434", fillcolor="#e1bee7"];
     }
 
+    subgraph cluster_audit {
+        label="Audit System";
+        style=dashed;
+        fillcolor="#fbe9e7";
+        color="#bf360c";
+        fontcolor="#bf360c";
+        fontsize=12;
+
+        audit_consumer [label="pg-audit-consumer\nJava 17\nWAL consumer (pgoutput)", fillcolor="#ffccbc"];
+        audit_log [label="pg-audit-log\nPostgreSQL 17\nAppend-only Audit\n:5435", fillcolor="#ffccbc"];
+    }
+
     etcd -> patroni1 [label=" leader election", style=dotted, color="#1565c0"];
     etcd -> patroni2 [label=" leader election", style=dotted, color="#1565c0"];
     etcd -> patroni3 [label=" leader election", style=dotted, color="#1565c0"];
@@ -75,6 +87,9 @@ digraph G {
 
     haproxy -> logical [label=" logical replication\n pgoutput plugin", style=bold, color="#6a1b9a"];
     logical -> haproxy [label=" subscription sync", style=bold, dir=none, color="#6a1b9a"];
+
+    haproxy -> audit_consumer [label=" WAL stream\n audit_slot", style=bold, color="#bf360c"];
+    audit_consumer -> audit_log [label=" INSERT rows\n (batch commit)", style=bold, color="#bf360c"];
 
     user [label="Client Apps", shape=plaintext, fontsize=12, fontcolor="gray20"];
     user -> haproxy [label=" :5432", color="#e65100"];

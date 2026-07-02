@@ -77,17 +77,171 @@ docker compose up -d
 
 ## Компоненты
 
-| Компонент | Роль | Порт (хост) |
-|-----------|------|-------------|
-| etcd | Хранилище состояния кластера | 2379 |
-| patroni1 | Нода БД #1 | — |
-| patroni2 | Нода БД #2 | — |
-| patroni3 | Нода БД #3 | — |
-| haproxy | Балансировщик к мастер-ноде | 5432 |
-| haproxy stats | Статистика | 7000 |
-| pgAdmin | Веб-интерфейс | 80 |
-| pg-physical-replica | Физическая standby-реплика (streaming) | 5433 |
-| pg-logical-replica | Логическая реплика (PUB/SUB) | 5434 |
+| Компонент | Роль | Порт (хост) | Зависит от |
+|-----------|------|-------------|------------|
+| etcd | Хранилище состояния кластера (DCS) | 2379 | — |
+| patroni1 | Нода БД #1 | 5001 (Patroni API) | etcd |
+| patroni2 | Нода БД #2 | 5002 (Patroni API) | etcd |
+| patroni3 | Нода БД #3 | 5003 (Patroni API) | etcd |
+| haproxy | R/W балансировщик к мастеру | 5432 (PG), 7000 (stats) | patroni1-3 (:8008) |
+| pgAdmin | Веб-интерфейс управления БД | 80 | haproxy (:5432) |
+| pg-physical-replica | Физическая standby (полная копия, WAL streaming) | 5433 | haproxy (:5432) |
+| pg-logical-replica | Логическая реплика (PUB/SUB, подмножество таблиц) | 5434 | haproxy (:5432) |
+| pg-audit-log | Аудит-БД (append-only, без ограничений целостности) | 5435 | — |
+| pg-audit-consumer | WAL consumer (Java 17, pgoutput v1) | — | haproxy (:5432), pg-audit-log (:5435) |
+
+### etcd
+
+Распределённое key-value хранилище — **единственная точка координации** для Patroni. Хранит:
+
+- **Leader lock** — ключ `/service/patroni_cluster/leader`, который захватывает текущий мастер. Если мастер перестаёт обновлять TTL (ttl=30s), etcd освобождает ключ, инициируя выборы нового лидера.
+- **Конфигурацию кластера** — параметры PostgreSQL, bootstrap.dcs.slots, режимы синхронизации.
+- **Членство нод** — каждая нода Patroni регистрирует себя с TTL и регулярно его продлевает.
+
+Без etcd Patroni не может определить, кто лидер — весь кластер становится недоступен для записи.
+
+### patroni1 / patroni2 / patroni3
+
+Каждая нода запускает два процесса внутри одного контейнера:
+
+1. **PostgreSQL 17** — слушает порт 5432 (внутри сети Docker). На мастере принимает запись, на репликах — read-only.
+2. **Patroni** — управляет жизненным циклом PostgreSQL: запуск, остановка, рестарт, promotion/demotion. REST API на порту 8008 (внутри Docker, проброшен на хост как 5001/5002/5003).
+
+**Как Patroni управляет PG:**
+
+- При старте Patroni проверяет, есть ли в etcd ключ лидера. Если нет — пытается стать лидером.
+- Если стал лидером — запускает PostgreSQL в режиме `hot_standby = off` (принимает запись).
+- Если не стал лидером — запускает PostgreSQL в режиме `hot_standby = on` (read-only) и настраивает `primary_conninfo` на текущего мастера через streaming replication.
+- Каждые ~10 секунд Patroni проверяет здоровье PG (`GET /health`) и обновляет TTL в etcd.
+- Если мастер не ответил на health-check, Patroni на репликах инициирует выборы нового лидера.
+
+**Health-check через REST API:**
+
+Patroni слушает порт 8008 (внутри Docker) для проверок:
+
+- `GET /master` — 200 OK, если нода мастер; 503, если нет
+- `GET /replica` — 200 OK, если нода реплика; 503, если нет
+- `GET /health` — 200 OK, если PostgreSQL жив и репликация работает
+- `GET /cluster` — JSON со списком всех нод, их ролями и состоянием
+
+### haproxy
+
+Единая точка входа в кластер — **все клиенты подключаются только через HAProxy**.
+
+**Как маршрутизирует запросы:**
+
+- Порт **5432** (PostgreSQL) — проверяет каждую Patroni-ноду через `httpchk GET /master` на порту 8008. Если нода ответила 200 — помечает её как `UP` и направляет трафик. Если 503 — нода в пуле реплик, трафик на неё не идёт.
+- Порт **7000** (HTTP stats) — веб-страница со списком всех нод, их статусом (`UP`/`DOWN`), активными сессиями и количеством запросов.
+
+**Почему HAProxy, а не Patroni-native балансировка:**
+
+- Единый порт для клиентов (:5432) — клиенту не нужно знать, какая нода мастер.
+- Прозрачный failover — при смене мастера HAProxy переключается за ~2 секунды (проверка каждые 1s, 2 failed checks = мастер недоступен). Клиент просто переподключается.
+- WAL-routing — физическая реплика подключается к `host=haproxy port=5432`, не зная адреса текущего мастера.
+
+### pgAdmin
+
+Веб-интерфейс для управления PostgreSQL на базе `dpage/pgadmin4`.
+
+- Авторизация: `admin@admin.com` / `admin`
+- При старте автоматически импортирует серверы из `pgadmin/servers.json`:
+  - **Patroni Cluster (via haproxy)** — подключение к `haproxy:5432`, база `shop`
+  - **pg-physical-replica** — подключение к `pg-physical-replica:5432`, база `shop`
+  - **pg-logical-replica** — подключение к `pg-logical-replica:5432`, база `shop`
+  - **pg-audit-log** — подключение к `pg-audit-log:5432`, база `postgres`
+
+### pg-physical-replica
+
+Полная физическая копия кластера PostgreSQL — **streaming WAL standby**.
+
+**Как инициализируется:**
+
+1. При первом запуске выполняет `pg_basebackup` через HAProxy (`host=haproxy port=5432`), получает полную копию данных текущего мастера.
+2. Создаёт `standby.signal` — переводит PG в режим hot standby (read-only).
+3. Настраивает `primary_conninfo` на `host=haproxy port=5432` — реплика постоянно стримит WAL с текущего мастера, не зная его адреса.
+4. При рестарте (второй и последующие запуски) пропускает `pg_basebackup` и сразу запускает standby.
+
+**Какие данные реплицируются:** все базы, таблицы, индексы, DDL, VACUUM, sequence changes — через двоичный WAL. Полная идентичность мастеру.
+
+**Для чего используется:**
+- Offload тяжёлых SELECT-запросов (отчёты, аналитика) с мастера.
+- Резервное копирование (pg_dump, pg_basebackup с реплики не нагружает мастер).
+- Hot standby для быстрого переключения при отказе мастера.
+
+**Ограничение:** только чтение — `standby.signal` блокирует любую запись.
+
+### pg-logical-replica
+
+Логическая реплика, подписанная на публикацию `shop_pub` — **реплицируется только DML на выбранных таблицах**.
+
+**Как инициализируется:**
+
+1. При первом запуске выполняет `initdb` (чистая база, не `pg_basebackup`).
+2. Создаёт схему `bookings` и таблицы (только структура, без данных).
+3. Создаёт подписку `shop_sub` с `copy_data = true` — PostgreSQL сам копирует все существующие данные из публикации и начинает стримить изменения.
+4. При рестарте проверяет, существует ли подписка; если нет — создаёт заново.
+
+**Что реплицируется:** только INSERT, UPDATE, DELETE на таблицах, включённых в публикацию `shop_pub`.
+
+**Что НЕ реплицируется:** DDL (ALTER TABLE, CREATE INDEX), sequences, VACUUM, TRUNCATE, системные таблицы.
+
+**Особенности:**
+- Технически таблицы не read-only — можно писать напрямую. Но такие изменения будут перезаписаны при следующем apply из подписки.
+- Первичные ключи должны совпадать — если на логической реплике есть строка с тем же PK, что пришёл с мастера, подписка упадёт с ошибкой duplicate key.
+- DDL на мастере требует ручного повторения на логической реплике, иначе apply сломается.
+- Для добавления новой таблицы в репликацию: `ALTER PUBLICATION shop_pub ADD TABLE ...;` на мастере — подписка подхватит автоматически.
+
+### pg-audit-log
+
+Отдельный экземпляр PostgreSQL, предназначенный только для **append-only** хранения аудита изменений.
+
+**Как устроена БД:**
+
+- Единственная схема `bookings` с 9 таблицами, повторяющими структуру таблиц основного кластера.
+- **Все колонки приведены к TEXT** — чтобы DDL на мастере (ALTER TABLE, изменение типов) не ломали аудит.
+- Каждая таблица дополнена 4 служебными колонками:
+  - `id_identity BIGINT GENERATED ALWAYS AS IDENTITY` — уникальный автоинкрементный ID
+  - `movedate DATE DEFAULT CURRENT_DATE` — дата вставки записи
+  - `moveusername TEXT DEFAULT 'wal_consumer'` — имя источника (всегда `wal_consumer`)
+  - `moveaction TEXT` — тип исходной операции: `'i'` (INSERT), `'u'` (UPDATE), `'d'` (DELETE)
+- **Нет PK, UK, FK, CHECK, DEFAULT (кроме служебных), NOT NULL, UNIQUE, индексов** — никакие ограничения целостности не накладываются, чтобы INSERT никогда не упал с ошибкой.
+
+**Почему TEXT для всех колонок:**
+- Изменение типа колонки на мастере (например, `INT → BIGINT`) не требует изменений в audit-схеме.
+- Значения, не помещающиеся в целевой тип (например, слишком длинная строка), не блокируют аудит.
+- Все значения приводятся к строке на стороне WAL consumer'а, pg-audit-log просто принимает строки.
+
+### pg-audit-consumer
+
+Java 17 приложение, которое читает логический слот репликации `audit_slot` и пишет изменения в `pg-audit-log`.
+
+**Полный цикл обработки:**
+
+1. **Подключение к мастеру** — коннектится к HAProxy (`host=haproxy port=5432 dbname=shop`) по replication-протоколу PostgreSQL.
+2. **Ожидание слота** — если слот `audit_slot` ещё не создан Patroni, ждёт до 3 секунд и повторяет попытки с паузой 5 секунд.
+3. **Чтение pgoutput v1** — двоичный протокол логической репликации. Сообщения:
+   - `Begin (b)` — начало транзакции (LSN, xid, timestamp)
+   - `Relation (r)` — описание таблицы (OID, schema, table, колонки с типами)
+   - `Insert (i)` — вставка строки (тупл со значениями)
+   - `Update (u)` — обновление строки (старый + новый тупл)
+   - `Delete (d)` — удаление строки (старый тупл или only key)
+   - `Commit (c)` — фиксация транзакции
+4. **Кэширование схем** — OID таблицы → (schema, table, список колонок). Сброс кэша при переподключении.
+5. **Накопление батча** — все сообщения внутри одной транзакции (Begin..Commit) собираются в буфер.
+6. **Запись в аудит-БД** — на Commit открывается транзакция в pg-audit-log и пишутся все накопленные строки одним batch INSERT.
+7. **Трансформация операций** — UPDATE и DELETE записываются как INSERT с `moveaction = 'u'` или `'d'`, чтобы сохранить историю изменений и удалений.
+8. **Обновление слота** — после успешного Commit в аудите подтверждается LSN слота (`confirmed_flush_lsn`), чтобы при перезапуске не перечитывать те же данные.
+
+**Как обрабатываются NULL и REPLICA IDENTITY:**
+- Если колонка в WAL содержит NULL, consumer пишет `\N` (текстовое представление NULL).
+- Для DELETE без полного тупла (режим `REPLICA IDENTITY DEFAULT`) используется только значение первичного ключа; остальные колонки заполняются `\N`.
+- Для корректного логирования всех колонок при DELETE у таблиц `seats` и `segments` установлен `REPLICA IDENTITY FULL`.
+
+**Retry при недоступности аудит-БД:**
+- Если pg-audit-log временно недоступен, consumer не пересоздаёт replication stream (избегая потери данных), а повторяет попытки записи с exponential backoff.
+- При переподключении к мастеру (например, после failover) слот `audit_slot` уже существует на новом мастере (permanent slot в Patroni), consumer просто перезапускает чтение.
+
+**Сборка:** Gradle 8.7, Java 17, fat JAR (`shadowJar`). Multi-stage Docker build.
 
 ## Архитектура
 
@@ -322,6 +476,86 @@ SELECT * FROM pg_stat_subscription;
    - Конфликте primary key (одинаковый PK, разные данные).
 3. **Patroni-кластер** — синхронный режим выключен (`synchronous_mode: false`), возможна потеря последних транзакций при жёстком сбое мастера (асинхронный commit).
 
+## 4. Аудит-лог (pg-audit-log :5435)
+
+Аудит-лог — отдельный экземпляр PostgreSQL для **append-only** хранения всех изменений (INSERT, UPDATE, DELETE) с таблиц основного кластера. Изменения доставляются через **WAL consumer** на Java 17, который читает логический слот репликации `audit_slot`.
+
+```
+Мастер Patroni → WAL consumer (Java) ← pgoutput v1 → pg-audit-log (append-only)
+                     ↓
+          Парсинг pgoutput: Relation / Insert / Update / Delete
+                     ↓
+          INSERT в audit-таблицу + movedate, moveusername, moveaction
+```
+
+### Как устроено
+
+| Компонент | Назначение |
+|-----------|-----------|
+| **pg-audit-log** | PostgreSQL 17 `postgres:17` с initdb и схемой `bookings` (9 таблиц). Каждая таблица — точная копия оригинальной по именам колонок, но все типы колонок — **TEXT**. Добавлены 4 служебных колонки. |
+| **pg-audit-consumer** | Java 17 приложение, подключается к HAProxy (:5432), читает слот `audit_slot`, декодирует pgoutput v1 протокол, пишет INSERT-only строки в pg-audit-log. |
+
+### Структура audit-таблиц
+
+Каждая из 9 таблиц схемы `bookings` на pg-audit-log содержит:
+
+- **Оригинальные колонки** — все `TEXT` (значения преобразуются в строки)
+- **`id_identity BIGINT GENERATED ALWAYS AS IDENTITY`** — уникальный автоинкрементный ID
+- **`movedate DATE DEFAULT CURRENT_DATE`** — дата вставки
+- **`moveusername TEXT DEFAULT 'wal_consumer'`** — источник изменения (всегда 'wal_consumer')
+- **`moveaction TEXT`** — тип операции: `'i'` (INSERT), `'u'` (UPDATE), `'d'` (DELETE)
+
+**Нет PK, UK, FK, CHECK, DEFAULT, NOT NULL, UNIQUE, индексов** — audit-таблицы только для вставки, без ограничений целостности.
+
+### Как работает WAL consumer (pg-audit-consumer)
+
+1. **Подключение к HAProxy** (`host=haproxy port=5432 dbname=shop`) по replication-протоколу.
+2. **Ожидание слота** `audit_slot` (ждёт до 3 секунд, если слот ещё не создан Patroni, повторяет с паузой 5 секунд).
+3. **Чтение pgoutput** версии 1 — бинарные сообщения: `Begin (b)`, `Relation (r)`, `Insert (i)`, `Update (u)`, `Delete (d)`, `Commit (c)`.
+4. **Кэширование схем** — OID таблицы → schema, table, колонки (сообщение `Relation`).
+5. **Накопление изменений** — все DML внутри одной транзакции (между `Begin` и `Commit`) собираются в батч.
+6. **Запись в аудит-БД** — на `Commit` батч пишется одной транзакцией (batch commit).
+7. **UPDATE и DELETE** — записываются как INSERT с `moveaction = 'u'` или `'d'`.
+
+### Поток данных
+
+```
+Begin (LSN, xid)
+  Relation (OID=12345 → bookings.airplanes_data: airplane_code, model, range, speed)
+  Insert (OID=12345 → '773', 'Boeing 777-300ER', '11100', '905')
+  Relation (OID=54321 → bookings.bookings: book_ref, book_date, total_amount)
+  Update (OID=54321 → 'ABC123', '2026-07-01', '25000.00')
+Commit
+```
+
+Превращается в 2 INSERT-строки:
+```sql
+INSERT INTO "bookings"."airplanes_data" ("airplane_code", "model", "range", "speed", movedate, moveusername, moveaction)
+VALUES ('773', 'Boeing 777-300ER', '11100', '905', CURRENT_DATE, 'wal_consumer', 'i');
+
+INSERT INTO "bookings"."bookings" ("book_ref", "book_date", "total_amount", movedate, moveusername, moveaction)
+VALUES ('ABC123', '2026-07-01', '25000.00', CURRENT_DATE, 'wal_consumer', 'u');
+```
+
+### Настройка слота аудита
+
+Слот `audit_slot` — **перманентный слот Patroni**, объявленный в `bootstrap.dcs.slots` файла `docker-compose.yml`. Это обеспечивает:
+
+- Автоматическое создание на каждом новом лидере после failover/switchover.
+- Копирование информации о слоте на standby-ноды через Patroni (`pg_replication_slot_advance()`).
+- Возможность подключения WAL consumer'а к HAProxy без ручного пересоздания слота.
+
+### Сборка WAL consumer
+
+```bash
+cd pg-audit-consumer
+gradle build          # сборка (включая тесты)
+gradle shadowJar      # fat JAR
+gradle test           # только тесты
+```
+
+В Docker Compose используется multi-stage build на базе `gradle:8.7-jdk17` и `eclipse-temurin:17-jre`.
+
 ## Обслуживание БД
 
 В кластере есть три категории баз данных, и каждая требует своего подхода при изменениях схемы:
@@ -517,13 +751,118 @@ VACUUM и ANALYZE можно выполнять на любой реплике (
 - **HAProxy stats** (`:7000`) — состояние бэкендов, количество сессий
 - **Docker** (`docker stats`) — ресурсы контейнеров
 
+### Мониторинг репликации
+
+#### Физическая репликация (WAL streaming)
+
+На **мастере** — общий лаг всех физических реплик через WAL:
+
+```sql
+-- лаг всех физических подписчиков WAL
+SELECT application_name, state, sync_state,
+       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS lag_bytes,
+       pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) AS lag_raw
+FROM pg_stat_replication;
+```
+
+На **физической реплике** — насколько её replay отстаёт от полученного WAL:
+
+```sql
+-- лаг apply на самой реплике
+SELECT pg_size_pretty(pg_wal_lsn_diff(
+    pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn()
+)) AS apply_lag;
+```
+
+#### Логическая репликация (PUB/SUB)
+
+На **мастере** — сколько WAL не забрал логический слот:
+
+```sql
+-- отставание слота shop_sub
+SELECT slot_name, slot_type, database,
+       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS lag_slot_bytes,
+       pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS confirmed_flush_lag_raw,
+       active
+FROM pg_replication_slots
+WHERE slot_name IN ('shop_sub', 'audit_slot');
+```
+
+На **логической реплике** — статус подписки и отставание apply worker:
+
+```sql
+-- отставание apply (разница между последним полученным LSN из WAL мастера
+-- и последним применённым на логической реплике)
+SELECT subname,
+       latest_end_lsn,
+       application_lsn,
+       pg_size_pretty(pg_wal_lsn_diff(latest_end_lsn, application_lsn)) AS apply_lag_bytes
+FROM pg_stat_subscription;
+
+-- статус apply worker
+SELECT pid, state, wait_event,
+       backend_type,
+       pg_size_pretty(
+           pg_wal_lsn_diff(pg_stat_get_activity(pid)::pg_lsn, pg_last_wal_replay_lsn())
+       ) AS worker_lag
+FROM pg_stat_activity
+WHERE backend_type LIKE '%logical replication%';
+```
+
+#### Audit consumer (WAL consumer)
+
+Отставание чтения WAL consumer'ом — через слот `audit_slot` на мастере:
+
+```sql
+-- отставание consumer
+SELECT slot_name,
+       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)) AS consumer_lag,
+       confirmed_flush_lsn,
+       pg_current_wal_lsn() AS current_wal
+FROM pg_replication_slots
+WHERE slot_name = 'audit_slot';
+```
+
+Если `confirmed_flush_lsn` не обновляется длительное время — WAL consumer упал или завис.
+
+#### Единый запрос (на мастере)
+
+```sql
+WITH
+phys AS (
+    SELECT 'physical' AS type, application_name,
+           pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) AS lag
+    FROM pg_stat_replication
+),
+slots AS (
+    SELECT 'logical:'||slot_name AS type,
+           pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS lag
+    FROM pg_replication_slots
+    WHERE slot_type = 'logical'
+)
+SELECT type,
+       CASE WHEN lag IS NULL THEN 'no data' ELSE pg_size_pretty(lag) END AS lag,
+       lag AS lag_raw
+FROM (
+    SELECT type, lag FROM phys
+    UNION ALL
+    SELECT type, lag FROM slots
+) x
+ORDER BY lag DESC NULLS LAST;
+```
+
 ### Рекомендуемые проверки
 
 ```sql
--- лаг репликации (на мастере)
+-- лаг репликации (на мастере) — физические подписчики WAL
 SELECT application_name, state, sync_state,
        pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS lag
 FROM pg_stat_replication;
+
+-- лаг логических слотов (shop_sub, audit_slot)
+SELECT slot_name,
+       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)) AS lag
+FROM pg_replication_slots WHERE slot_type = 'logical';
 
 -- здоровье Patroni
 -- GET http://localhost:8008/health

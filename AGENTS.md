@@ -16,6 +16,7 @@ Web UI: http://localhost:80 — `admin@admin.com` / `admin`
 - **HAProxy** — single R/W endpoint to master (`:5432`), stats at `:7000`
 - **pg-physical-replica** (`:5433`) — streaming WAL standby, `pg_basebackup` from HAProxy on first boot
 - **pg-logical-replica** (`:5434`) — logical replication via `shop_pub` publication and `shop_sub` subscription
+- **pg-audit-log** (`:5435`) — append-only audit log via WAL consumer (Java 17), reads `audit_slot`
 - **pgAdmin** (`:80`) — pre-registered servers via `pgadmin/servers.json`
 - All services on Docker network `patroni-net`
 
@@ -27,7 +28,12 @@ Web UI: http://localhost:80 — `admin@admin.com` / `admin`
 | Check master via SQL | `psql -h localhost -p 5432 -U postgres -d shop -c "SELECT inet_server_addr();"` |
 | Check master via REST | `curl -s http://localhost:7000` (HAProxy stats page) |
 | Stop master (failover test) | `docker compose stop <master-name>` |
-| Check replication lag | `SELECT application_name, state, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS lag FROM pg_stat_replication;` |
+| Check physical replication lag | `SELECT application_name, state, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS lag FROM pg_stat_replication;` |
+| Check logical slot lag (shop_sub + audit_slot) | `SELECT slot_name, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)) AS lag FROM pg_replication_slots WHERE slot_type = 'logical';` |
+| Check logical apply lag on replica | `SELECT subname, pg_size_pretty(pg_wal_lsn_diff(latest_end_lsn, application_lsn)) AS lag FROM pg_stat_subscription;` |
+| Check all replication lag (summary) | `WITH phys AS (SELECT 'physical' AS t, application_name, pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) AS lag FROM pg_stat_replication), slots AS (SELECT 'logical:'||slot_name AS t, pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS lag FROM pg_replication_slots WHERE slot_type = 'logical') SELECT t, CASE WHEN lag IS NULL THEN 'no data' ELSE pg_size_pretty(lag) END AS lag FROM (SELECT t, lag FROM phys UNION ALL SELECT t, lag FROM slots) x ORDER BY lag DESC NULLS LAST;` |
+| Check audit consumer logs | `docker compose logs pg-audit-consumer` |
+| Build all services | `docker compose build` |
 | Build with specific Patroni | `docker compose build --build-arg PATRONI_VERSION=4.1.5` |
 | Reset volumes | `docker compose down -v` |
 
@@ -48,7 +54,9 @@ Web UI: http://localhost:80 — `admin@admin.com` / `admin`
 | HAProxy (:5432) | Health checks detect new master via `:8008` API | **None** |
 | Physical replica | Continues streaming from new master via HAProxy | **None** |
 | Logical slot `shop_sub` | Permanent slot already exists on new leader (configured in `bootstrap.dcs.slots`) | **None** |
+| Logical slot `audit_slot` | Permanent slot for WAL consumer (configured in `bootstrap.dcs.slots`) | **None** |
 | Logical apply worker | Detects new master, reconnects to slot `shop_sub` | **Possibly** — if `pg_stat_subscription` is empty 5 min after failover, restart worker (see below) |
+| WAL consumer (pg-audit) | Reconnects to new master via HAProxy, slot survives via DCS | **None** |
 | App via HAProxy :5432 | Transparently routed to new master | **None** |
 | DDL execution | Must be done on new master (as before) | **None** |
 

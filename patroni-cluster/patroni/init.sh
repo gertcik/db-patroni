@@ -13,6 +13,11 @@ psql -U postgres -c "CREATE DATABASE shop;"
 # На основе PostgresPRO demo-small (адаптировано)
 psql -U postgres -d shop -f /scripts/demo-airlines.sql
 
+# ─── REPLICA IDENTITY FULL для таблиц с fare_conditions ───
+# Чтобы DELETE/UPDATE присылали старый кортеж со всеми колонками
+psql -U postgres -d shop -c "ALTER TABLE ONLY bookings.seats REPLICA IDENTITY FULL;"
+psql -U postgres -d shop -c "ALTER TABLE ONLY bookings.segments REPLICA IDENTITY FULL;"
+
 # ─── Публикация для логической репликации ───
 # Включает таблицы shop + все таблицы авиаперевозок
 psql -U postgres -d shop -c "
