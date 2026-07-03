@@ -43,6 +43,7 @@ services:
         restapi:
           listen: 0.0.0.0:8008
           connect_address: patroni1:8008           # Адрес для HAProxy health-check
+          metrics: true                            # Включить /metrics для Prometheus
         postgresql:
           listen: 0.0.0.0:5432
           connect_address: patroni1:5432
@@ -101,6 +102,7 @@ services:
         restapi:
           listen: 0.0.0.0:8008
           connect_address: patroni2:8008
+          metrics: true
         postgresql:
           listen: 0.0.0.0:5432
           connect_address: patroni2:5432
@@ -160,6 +162,7 @@ services:
         restapi:
           listen: 0.0.0.0:8008
           connect_address: patroni3:8008
+          metrics: true
         postgresql:
           listen: 0.0.0.0:5432
           connect_address: patroni3:5432
@@ -360,12 +363,113 @@ services:
     depends_on:
       - haproxy
 
-#volumes:
-#  pgdata1:
-#  pgdata2:
-#  pgdata3:
-#  pg_physical:
-#  pg_logical:
+  # ─── Мониторинг: postgres_exporter (на каждый экземпляр PG) ───
+  pg-exporter-patroni1:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://postgres:secret@patroni1:5432/shop?sslmode=disable
+    networks:
+      - patroni-net
+    depends_on:
+      - patroni1
+
+  pg-exporter-patroni2:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://postgres:secret@patroni2:5432/shop?sslmode=disable
+    networks:
+      - patroni-net
+    depends_on:
+      - patroni2
+
+  pg-exporter-patroni3:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://postgres:secret@patroni3:5432/shop?sslmode=disable
+    networks:
+      - patroni-net
+    depends_on:
+      - patroni3
+
+  pg-exporter-physical:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://postgres:secret@pg-physical-replica:5432/shop?sslmode=disable
+    networks:
+      - patroni-net
+    depends_on:
+      - pg-physical-replica
+
+  pg-exporter-logical:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://postgres:secret@pg-logical-replica:5432/shop?sslmode=disable
+    networks:
+      - patroni-net
+    depends_on:
+      - pg-logical-replica
+
+  pg-exporter-audit:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://postgres:secret@pg-audit-log:5432/shop?sslmode=disable
+    networks:
+      - patroni-net
+    depends_on:
+      - pg-audit-log
+
+  # ─── Prometheus: сбор метрик ───
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/etc/prometheus/console_libraries
+      - --web.console.templates=/etc/prometheus/consoles
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - ./data/prometheus:/prometheus
+    networks:
+      - patroni-net
+    depends_on:
+      - patroni1
+      - patroni2
+      - patroni3
+
+  # ─── Grafana: дашборды ───
+  grafana:
+    image: grafana/grafana:11.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: ""
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./data/grafana:/var/lib/grafana
+    networks:
+      - patroni-net
+    depends_on:
+      - prometheus
+
+  # ─── cadvisor: метрики контейнеров ───
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - patroni-net
 
 networks:
   patroni-net:
