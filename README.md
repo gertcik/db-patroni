@@ -202,7 +202,7 @@ Patroni слушает порт 8008 (внутри Docker) для проверо
 - Каждая таблица дополнена 4 служебными колонками:
   - `id_identity BIGINT GENERATED ALWAYS AS IDENTITY` — уникальный автоинкрементный ID
   - `movedate DATE DEFAULT CURRENT_DATE` — дата вставки записи
-  - `moveusername TEXT DEFAULT 'wal_consumer'` — имя источника (всегда `wal_consumer`)
+   - `moveusername TEXT DEFAULT 'wal_consumer'` — имя источника (всегда `wal_consumer`) ⚠️ см. «Известные ограничения»
   - `moveaction TEXT` — тип исходной операции: `'i'` (INSERT), `'u'` (UPDATE), `'d'` (DELETE)
 - **Нет PK, UK, FK, CHECK, DEFAULT (кроме служебных), NOT NULL, UNIQUE, индексов** — никакие ограничения целостности не накладываются, чтобы INSERT никогда не упал с ошибкой.
 
@@ -502,7 +502,7 @@ SELECT * FROM pg_stat_subscription;
 - **Оригинальные колонки** — все `TEXT` (значения преобразуются в строки)
 - **`id_identity BIGINT GENERATED ALWAYS AS IDENTITY`** — уникальный автоинкрементный ID
 - **`movedate DATE DEFAULT CURRENT_DATE`** — дата вставки
-- **`moveusername TEXT DEFAULT 'wal_consumer'`** — источник изменения (всегда 'wal_consumer')
+- **`moveusername TEXT DEFAULT 'wal_consumer'`** — источник изменения (всегда 'wal_consumer') ⚠️ см. «Известные ограничения»
 - **`moveaction TEXT`** — тип операции: `'i'` (INSERT), `'u'` (UPDATE), `'d'` (DELETE)
 
 **Нет PK, UK, FK, CHECK, DEFAULT, NOT NULL, UNIQUE, индексов** — audit-таблицы только для вставки, без ограничений целостности.
@@ -871,6 +871,26 @@ FROM pg_replication_slots WHERE slot_type = 'logical';
 SELECT pid, state, wait_event, query_start, left(query, 60)
 FROM pg_stat_activity WHERE state != 'idle' ORDER BY query_start;
 ```
+
+## Известные ограничения
+
+### `moveusername` всегда `'wal_consumer'`
+
+WAL consumer (`pg-audit-consumer`) использует replication-протокол PostgreSQL для чтения логического слота `audit_slot`. В этом режиме подключение выполняется от системного пользователя репликации (`replicator`), а не от того пользователя, который выполнил DML-операцию на мастере.
+
+**Следствие:** колонка `moveusername` в audit-таблицах всегда содержит значение `'wal_consumer'` — оригинальный пользователь БД (например, `postgres` или `alice`) теряется.
+
+**Когда это может быть важно:**
+- Аудит требует идентификации, кто именно выполнил изменение (INSERT/UPDATE/DELETE)
+- Расследование инцидентов: нужно знать, какой пользователь удалил запись
+
+**Варианты решения (не реализованы):**
+1. **Дополнительная колонка на мастере** — добавить в каждую таблице колонку `modified_by TEXT DEFAULT current_user`, тогда оригинальный пользователь попадёт в WAL как обычное значение колонки.
+2. **Хранимая процедура** — все DML через процедуру, которая логирует `current_user` в отдельную таблицу.
+3. **pg_audit extension** — включить `pg_audit` для логирования всех DML с пользователем (но это внешний лог, не в формате строк audit-таблиц).
+4. **session_replication_role + триггеры** — на логической реплике добавить триггеры, которые при apply подставляют `current_user` (неприменимо для audit-log — там нет подписки, только WAL consumer).
+
+**Текущее состояние:** `moveusername` — константа `'wal_consumer'`. Если требуется точное имя пользователя — использовать вариант 1 (колонка на мастере).
 
 ## Остановка
 

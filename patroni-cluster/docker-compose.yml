@@ -291,6 +291,38 @@ services:
       - haproxy
       - pg-audit-log
 
+  # ─── Load Generator: многопоточный генератор DML-нагрузки ───
+  # Создаёт реалистичные DML-операции (INSERT/UPDATE/DELETE) на таблицах схемы bookings.
+  # Подключается к мастеру через HAProxy.
+  # Работает в N потоков (настраивается):
+  #   - BookingWorker: создаёт цепочку bookings → tickets → segments → boarding_passes
+  #   - FlightWorker: создаёт и обновляет статус рейсов
+  #   - CancellerWorker: удаляет случайные бронирования
+  #   - MassUpdater: массовые UPDATE (статусы рейсов, суммы бронирований)
+  load-generator:
+    build: ./load-generator
+    restart: unless-stopped
+    environment:
+      DB_HOST: haproxy
+      DB_PORT: "5432"
+      DB_NAME: shop
+      DB_USER: postgres
+      DB_PASSWORD: secret
+      THREADS_BOOKING: "3"
+      THREADS_FLIGHT: "2"
+      THREADS_CANCELLER: "1"
+      THREADS_MASS_UPDATER: "1"
+      POOL_MIN: "4"
+      POOL_MAX: "20"
+      SLEEP_MIN_MS: "100"
+      SLEEP_MAX_MS: "500"
+      STATS_INTERVAL_SEC: "10"
+      LOG_LEVEL: INFO
+    networks:
+      - patroni-net
+    depends_on:
+      - haproxy
+
   # ─── HAProxy: балансировщик и единая точка входа ───
   # - Порт 5432: все клиентские подключения (автоматически направляются на мастер)
   # - Порт 7000: статистика (health check, статус узлов)

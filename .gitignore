@@ -218,3 +218,5 @@ __marimo__/
 .streamlit/secrets.toml
 
 patroni-cluster/data/
+patroni-cluster/pg-audit-consumer/.gradle
+patroni-cluster/pg-audit-consumer/build
