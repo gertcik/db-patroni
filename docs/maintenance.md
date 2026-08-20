@@ -1,12 +1,31 @@
 # Обслуживание БД
 
-В кластере есть три категории баз данных, и каждая требует своего подхода при изменениях схемы:
+В кластере четыре категории баз данных, и каждая требует своего подхода:
 
-| Категория | Характеристика | Запись | DDL |
-|-----------|---------------|--------|-----|
-| **Patroni-кластер** (patroni1/2/3) | Managed by Patroni, автоfailover | Только мастер | На мастере, автоматически реплицируется |
-| **Физическая реплика** (pg-physical-replica) | Streaming WAL, read-only | Нет | Нет (копия с мастера) |
-| **Логическая реплика** (pg-logical-replica) | Logical replication, read-only через подписку | Нет | Нет (копия через publication) |
+| Категория | Характеристика | DML (INSERT/UPDATE/DELETE) | DDL (CREATE/ALTER/DROP) | Обслуживание (VACUUM/ANALYZE) |
+|-----------|---------------|---------------------------|------------------------|-------------------------------|
+| **Patroni-кластер** (patroni1/2/3) | Managed by Patroni, автоfailover | **Да** — только на мастере | **Да** — на мастере, автоматически реплицируется | **Да** — на мастере (autovacuum) |
+| **Физическая реплика** (pg-physical-replica) | Streaming WAL, read-only | **Нет** — standby.signal блокирует запись | **Нет** — копия с мастера через WAL | **Нет** — копия с мастера через WAL |
+| **Логическая реплика** (pg-logical-replica) | Logical replication, read-only через подписку | **Нет** — apply worker применяет DML из подписки | **Нет** — DDL не реплицируются, нужен ручной DDL | **Нет** — копия с мастера через WAL |
+| **pg-audit-log** | Append-only аудит-БД (all TEXT, без ограничений) | **Да** — но НЕ на таблицах `bookings.*` (append-only через WAL consumer) | **Да** — но НЕ на таблицах `bookings.*` (схема фиксирована) | **Да** — autovacuum работает, ANALYZE для статистики |
+
+## Что разрешено и запрещено
+
+| Операция | Patroni-мастер | Patroni-реплики | Физическая реплика | Логическая реплика | pg-audit-log (любые таблицы кроме `bookings.*`) | pg-audit-log (`bookings.*` — аудит-таблицы) |
+|----------|---------------|-----------------|-------------------|-------------------|-----------------------------------------------|---------------------------------------------|
+| INSERT / UPDATE / DELETE | ✅ | ❌ (read-only) | ❌ (read-only) | ❌ (apply worker) | ✅ | ⚠️ только INSERT через WAL consumer |
+| CREATE TABLE / INDEX | ✅ (auto-replicates) | ❌ | ❌ | ⚠️ ручной DDL | ✅ | ❌ |
+| ALTER TABLE | ✅ (auto-replicates) | ❌ | ❌ | ⚠️ ручной DDL | ✅ | ❌ |
+| DROP TABLE / INDEX | ✅ (auto-replicates) | ❌ | ❌ | ⚠️ ручной DDL | ✅ | ❌ |
+| VACUUM / ANALYZE | ✅ (autovacuum) | ❌ | ❌ | ❌ | ✅ | ✅ (autovacuum) |
+| TRUNCATE | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ (не реплицируется) |
+| Функция/процедура **с изменением данных** (INSERT/UPDATE/DELETE) | ✅ | ❌ (read-only) | ❌ (read-only) | ⚠️ выполнится, но данные не реплицируются | ✅ | ⚠️ только INSERT через WAL consumer |
+| Функция/процедура **без изменения данных** (SELECT, временные таблицы) | ✅ | ✅ | ✅ (read-only) | ✅ | ✅ | ✅ (read-only) |
+| Временные таблицы (`CREATE TEMP TABLE`) | ✅ | ✅ (session-local) | ❌ (read-only) | ✅ (session-local) | ✅ (session-local) | ✅ (session-local) |
+
+> **pg-audit-log — это отдельный экземпляр PostgreSQL**, а не реплика Patroni. На нём можно выполнять любые DDL/DML операции на произвольных таблицах. Но таблицы схемы `bookings.*` (9 аудит-таблиц) — append-only: их структура и данные управляются только WAL consumer'ом. ⚠️ Любая прямая модификация `bookings.*` (INSERT/UPDATE/DELETE/ALTER/DROP) нарушит целостность аудита и может привести к ошибке consumer'а.
+
+> **Временные таблицы на физической реплике**: в upstream PostgreSQL 17/18 `CREATE TEMP TABLE` запрещён в hot standby (read-only транзакции), потому что DDL требует обновления системного каталога, а транзакции на standby не получают XID ([Hot Standby — Caveats](https://www.postgresql.org/docs/18/hot-standby.html#STANDBY-CAVEATS)). В **Postgres Pro Enterprise 18.4.1** это ограничение снято — временные таблицы, последовательности, представления и временные функции работают на репликах при включённых параметрах `enable_standby_temp_tables`, `enable_temp_memory_catalog` и `hot_standby` ([релиз 18.4.1](https://habr.com/ru/companies/postgrespro/news/1056090/)).
 
 ## Как добавлять / удалять таблицы
 

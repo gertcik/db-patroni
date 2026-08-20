@@ -15,6 +15,9 @@
 
 1. Docker Engine 24+
 2. Docker Compose v2
+3. PostgreSQL 18
+4. Patroni 4.1.3 (настраивается через `PATRONI_VERSION` в `patroni-cluster/patroni/Dockerfile`)
+5. Java 17 + Gradle 8.7 (pg-audit-consumer)
 
 ## Быстрый старт
 
