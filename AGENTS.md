@@ -151,9 +151,10 @@ Move `.md` files between dirs to track state. Files use frontmatter-style fields
 - `patroni-cluster/replica-logical/entrypoint.sh` — logical replica init
 - `patroni-cluster/pgadmin/servers.json` — pgAdmin auto-registration
 - `patroni-cluster/haproxy/haproxy.cfg` — HAProxy config
-- `README.md` — index (93 lines, links to docs/*)
+- `README.md` — index (~165 lines, links to docs/*, requirements traceability, primary requirements status)
 - `docs/components.md` — components, architecture, build
 - `docs/replication.md` — DML replication, audit log, slot recovery
 - `docs/maintenance.md` — DDL, indexes, logical replica recovery
 - `docs/monitoring.md` — metrics, known limitations, Windows issues
+- `docs/issues.md` — hot standby limitations, Postgres Pro Enterprise 18.4.1
 - `backlog/README.md` — backlog conventions

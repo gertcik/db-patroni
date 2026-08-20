@@ -25,7 +25,7 @@
 
 > **pg-audit-log — это отдельный экземпляр PostgreSQL**, а не реплика Patroni. На нём можно выполнять любые DDL/DML операции на произвольных таблицах. Но таблицы схемы `bookings.*` (9 аудит-таблиц) — append-only: их структура и данные управляются только WAL consumer'ом. ⚠️ Любая прямая модификация `bookings.*` (INSERT/UPDATE/DELETE/ALTER/DROP) нарушит целостность аудита и может привести к ошибке consumer'а.
 
-> **Временные таблицы на физической реплике**: в upstream PostgreSQL 17/18 `CREATE TEMP TABLE` запрещён в hot standby (read-only транзакции), потому что DDL требует обновления системного каталога, а транзакции на standby не получают XID ([Hot Standby — Caveats](https://www.postgresql.org/docs/18/hot-standby.html#STANDBY-CAVEATS)). В **Postgres Pro Enterprise 18.4.1** это ограничение снято — временные таблицы, последовательности, представления и временные функции работают на репликах при включённых параметрах `enable_standby_temp_tables`, `enable_temp_memory_catalog` и `hot_standby` ([релиз 18.4.1](https://habr.com/ru/companies/postgrespro/news/1056090/)).
+> **Проблемы физической реплики** (ограничения hot standby: временные таблицы, DML, хранимые процедуры) вынесены в отдельный файл: [Известные проблемы](issues.md).
 
 ## Как добавлять / удалять таблицы
 
