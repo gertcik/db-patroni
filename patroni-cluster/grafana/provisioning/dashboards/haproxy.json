@@ -40,8 +40,8 @@
       "options": { "sortBy": [] },
       "targets": [
         {
-          "expr": "haproxy_server_up",
-          "legendFormat": "{{backend}}/{{server}}",
+          "expr": "haproxy_server_status{state=\"UP\"}",
+          "legendFormat": "{{proxy}}/{{server}}",
           "instant": true
         }
       ]
@@ -81,8 +81,8 @@
       "options": { "legend": { "calcs": ["last", "max"], "displayMode": "table", "placement": "right" } },
       "targets": [
         {
-          "expr": "rate(haproxy_frontend_requests_total[5m])",
-          "legendFormat": "{{frontend}}"
+          "expr": "rate(haproxy_frontend_http_requests_total[5m])",
+          "legendFormat": "{{proxy}}"
         }
       ]
     },
@@ -102,8 +102,8 @@
       "options": { "legend": { "calcs": ["last", "max"], "displayMode": "table", "placement": "right" } },
       "targets": [
         {
-          "expr": "haproxy_backend_http_average_response_time_ms",
-          "legendFormat": "{{backend}}"
+          "expr": "haproxy_backend_response_time_average_seconds",
+          "legendFormat": "{{proxy}}"
         }
       ]
     },
@@ -124,11 +124,11 @@
       "targets": [
         {
           "expr": "rate(haproxy_frontend_bytes_in_total[5m])",
-          "legendFormat": "IN {{frontend}}"
+          "legendFormat": "IN {{proxy}}"
         },
         {
           "expr": "rate(haproxy_frontend_bytes_out_total[5m])",
-          "legendFormat": "OUT {{frontend}}"
+          "legendFormat": "OUT {{proxy}}"
         }
       ]
     },
@@ -148,7 +148,7 @@
       "targets": [
         {
           "expr": "rate(haproxy_backend_connection_errors_total[5m])",
-          "legendFormat": "{{backend}} {{server}}"
+          "legendFormat": "{{proxy}} {{server}}"
         }
       ]
     }

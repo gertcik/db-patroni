@@ -1,11 +1,11 @@
 # ═══════════════════════════════════════════════════════════════
-# Patroni-узел: PostgreSQL 17 + Patroni + etcd-клиент
+# Patroni-узел: PostgreSQL 18 + Patroni + etcd-клиент
 # Запускает Patroni, который управляет PostgreSQL:
 #   - выбирает лидера среди 3 узлов
 #   - выполняет failover при отказе мастера
 #   - запускает post_bootstrap скрипт на первом лидере
 # ═══════════════════════════════════════════════════════════════
-FROM postgres:17
+FROM postgres:18
 
 # Версия Patroni — можно переопределить при сборке:
 #   docker compose build --build-arg PATRONI_VERSION=4.1.5

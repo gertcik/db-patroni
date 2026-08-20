@@ -1,4 +1,4 @@
-# Отказоустойчивый кластер PostgreSQL 17 + Patroni + pgAdmin в Docker Compose
+# Отказоустойчивый кластер PostgreSQL 18 + Patroni + pgAdmin в Docker Compose
 
 **Статус:** wait
 **Приоритет:** high
@@ -6,10 +6,10 @@
 **Дедлайн:**
 
 ## Описание
-Развернуть отказоустойчивую конфигурацию PostgreSQL 17 с использованием Patroni в Docker Compose. Кластер из 3 серверов БД, предзаполненная тестовая БД, pgAdmin для доступа через кластер Patroni, инструкции по запуску.
+Развернуть отказоустойчивую конфигурацию PostgreSQL 18 с использованием Patroni в Docker Compose. Кластер из 3 серверов БД, предзаполненная тестовая БД, pgAdmin для доступа через кластер Patroni, инструкции по запуску.
 
 ## Критерии готовности (DoD)
-- [ ] Кластер Patroni из 3 нод PostgreSQL 17 поднимается одной командой
+- [ ] Кластер Patroni из 3 нод PostgreSQL 18 поднимается одной командой
 - [ ] Настроена репликация и автоматический failover
 - [ ] Создана тестовая БД с предзаполненными данными (при первом запуске)
 - [ ] pgAdmin подключён к кластеру через Patroni (haproxy/запасной эндпоинт)
@@ -20,7 +20,7 @@
 1. Спроектировать архитектуру — образы, сеть, сервисы, порты
 2. Написать docker-compose.yml:
    - etcd/consul для хранения состояния Patroni
-   - 3 сервиса patroni с PostgreSQL 17
+   - 3 сервиса patroni с PostgreSQL 18
    - haproxy для балансировки запросов к кластеру
    - pgadmin
 3. Настроить Patroni: конфиги, bootstrap DDL, инициализация тестовой БД
@@ -30,7 +30,7 @@
 7. Протестировать: поднятие, failover, отказ ноды, подключение pgAdmin
 
 ## Заметки
-- PostgreSQL 17 — образ `postgres:17`
+- PostgreSQL 18 — образ `postgres:18`
 - Patroni — официальный образ `patroni:latest` или собрать свой
 - etcd — `bitnami/etcd` или `gcr.io/etcd-development/etcd`
 - haproxy — `haproxy:lts-alpine`

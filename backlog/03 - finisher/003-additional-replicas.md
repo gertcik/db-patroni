@@ -1,6 +1,6 @@
-# 003 — Дополнительные реплики PostgreSQL 17
+# 003 — Дополнительные реплики PostgreSQL 18
 
-Добавить 2 экземпляра PostgreSQL 17 в существующий docker-compose.yml кластера Patroni:
+Добавить 2 экземпляра PostgreSQL 18 в существующий docker-compose.yml кластера Patroni:
 
 1. **Физическая реплика** (streaming replication) через HAProxy
 2. **Логическая реплика** (logical replication) таблиц `shop.*`
@@ -11,7 +11,7 @@
 - Оба экземпляра в `patroni-cluster/docker-compose.yml`
 - Каждый на своём Docker volume для данных
 - Пароль суперпользователя: `secret` (как в кластере)
-- Версия PostgreSQL: 17 (образ `postgres:17`)
+- Версия PostgreSQL: 17 (образ `postgres:18`)
 
 ### Физическая реплика (через HAProxy)
 - `primary_conninfo` указывает на `haproxy:5432`, пользователь `replicator`
@@ -29,8 +29,8 @@
 
 ### docker-compose.yml
 Добавить 2 сервиса:
-- `pg-physical-replica` — образ `postgres:17`, настроенный как горячая standby через `primary_conninfo`
-- `pg-logical-replica` — образ `postgres:17`, настроенный с логической подпиской (CREATE SUBSCRIPTION)
+- `pg-physical-replica` — образ `postgres:18`, настроенный как горячая standby через `primary_conninfo`
+- `pg-logical-replica` — образ `postgres:18`, настроенный с логической подпиской (CREATE SUBSCRIPTION)
 
 ### HAProxy
 Текущая конфигурация HAProxy должна пропускать replication-трафик на мастер (проверить).

@@ -76,7 +76,7 @@ public class App {
             var props = new Properties();
             props.setProperty("user", cfg.sourceUser);
             props.setProperty("password", cfg.sourcePassword);
-            props.setProperty("assumeMinServerVersion", "17");
+            props.setProperty("assumeMinServerVersion", "18");
 
             try (var replicationConn = DriverManager.getConnection(url, props)) {
                 PGConnection pgConn = replicationConn.unwrap(PGConnection.class);

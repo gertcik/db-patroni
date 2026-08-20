@@ -1,4 +1,4 @@
-FROM postgres:17
+FROM postgres:18
 
 RUN mkdir -p /sql
 COPY init-audit.sql /sql/init-audit.sql

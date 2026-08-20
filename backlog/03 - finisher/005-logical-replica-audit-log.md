@@ -22,7 +22,7 @@ pg-audit-consumer (Java 17, отдельный контейнер)
     └── Пишет INSERT в pg-audit-log
          │
          ▼
-pg-audit-log (PostgreSQL 17, отдельный контейнер)
+pg-audit-log (PostgreSQL 18, отдельный контейнер)
     └── Таблицы bookings.* с audit-полями, без PK/UK/FK
 ```
 

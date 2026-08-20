@@ -217,6 +217,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Пользовательские исключения
 patroni-cluster/data/
 patroni-cluster/pg-audit-consumer/.gradle
 patroni-cluster/pg-audit-consumer/build

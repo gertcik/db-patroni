@@ -22,16 +22,16 @@ digraph G {
     }
 
     subgraph cluster_patroni {
-        label="Patroni Cluster (PostgreSQL 17)";
+        label="Patroni Cluster (PostgreSQL 18)";
         style=dashed;
         fillcolor="#e8f5e9";
         color="#2e7d32";
         fontcolor="#2e7d32";
         fontsize=12;
 
-        patroni1 [label="patroni1\nPostgreSQL 17\nREST API :8008", fillcolor="#c8e6c9"];
-        patroni2 [label="patroni2\nPostgreSQL 17\nREST API :8008", fillcolor="#c8e6c9"];
-        patroni3 [label="patroni3\nPostgreSQL 17\nREST API :8008", fillcolor="#c8e6c9"];
+        patroni1 [label="patroni1\nPostgreSQL 18\nREST API :8008", fillcolor="#c8e6c9"];
+        patroni2 [label="patroni2\nPostgreSQL 18\nREST API :8008", fillcolor="#c8e6c9"];
+        patroni3 [label="patroni3\nPostgreSQL 18\nREST API :8008", fillcolor="#c8e6c9"];
     }
 
     subgraph cluster_proxy {
@@ -54,8 +54,8 @@ digraph G {
         fontcolor="#6a1b9a";
         fontsize=12;
 
-        physical [label="pg-physical-replica\nPostgreSQL 17\nStreaming Replica\n:5433", fillcolor="#e1bee7"];
-        logical [label="pg-logical-replica\nPostgreSQL 17\nLogical Replica\n:5434", fillcolor="#e1bee7"];
+        physical [label="pg-physical-replica\nPostgreSQL 18\nStreaming Replica\n:5433", fillcolor="#e1bee7"];
+        logical [label="pg-logical-replica\nPostgreSQL 18\nLogical Replica\n:5434", fillcolor="#e1bee7"];
     }
 
     subgraph cluster_audit {
@@ -67,7 +67,7 @@ digraph G {
         fontsize=12;
 
         audit_consumer [label="pg-audit-consumer\nJava 17\nWAL consumer (pgoutput)", fillcolor="#ffccbc"];
-        audit_log [label="pg-audit-log\nPostgreSQL 17\nAppend-only Audit\n:5435", fillcolor="#ffccbc"];
+        audit_log [label="pg-audit-log\nPostgreSQL 18\nAppend-only Audit\n:5435", fillcolor="#ffccbc"];
     }
 
     etcd -> patroni1 [label=" leader election", style=dotted, color="#1565c0"];
@@ -82,13 +82,13 @@ digraph G {
     haproxy -> patroni2 [label=" R/W queries", dir=both, color="#2e7d32"];
     haproxy -> patroni3 [label=" R/W queries", dir=both, color="#2e7d32"];
 
-    haproxy -> physical [label=" pg_basebackup\n streaming WAL", style=bold, color="#6a1b9a"];
+    haproxy -> physical [label=" pg_basebackup (once)\n streaming WAL (ongoing)", style=bold, color="#6a1b9a"];
     physical -> haproxy [label=" WAL stream", style=bold, dir=none, color="#6a1b9a"];
 
-    haproxy -> logical [label=" logical replication\n pgoutput plugin", style=bold, color="#6a1b9a"];
+    haproxy -> logical [label=" logical replication\n pgoutput plugin\n slot: shop_sub", style=bold, color="#6a1b9a"];
     logical -> haproxy [label=" subscription sync", style=bold, dir=none, color="#6a1b9a"];
 
-    haproxy -> audit_consumer [label=" WAL stream\n audit_slot", style=bold, color="#bf360c"];
+    haproxy -> audit_consumer [label=" WAL stream\n slot: audit_slot", style=bold, color="#bf360c"];
     audit_consumer -> audit_log [label=" INSERT rows\n (batch commit)", style=bold, color="#bf360c"];
 
     user [label="Client Apps", shape=plaintext, fontsize=12, fontcolor="gray20"];

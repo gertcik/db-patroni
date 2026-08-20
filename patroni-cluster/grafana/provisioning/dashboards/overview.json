@@ -44,8 +44,8 @@
       },
       "targets": [
         {
-          "expr": "patroni_master == 1",
-          "legendFormat": "{{member}}",
+          "expr": "patroni_primary == 1",
+          "legendFormat": "{{name}}",
           "instant": true
         }
       ]
@@ -97,8 +97,8 @@
       "options": { "legend": { "calcs": ["last", "max"], "displayMode": "table", "placement": "right" } },
       "targets": [
         {
-          "expr": "patroni_lag{member=~\"patroni.*\"}",
-          "legendFormat": "{{member}}"
+          "expr": "pg_replication_lag_seconds",
+          "legendFormat": "{{server}}"
         }
       ]
     },
@@ -252,7 +252,7 @@
       },
       "targets": [
         {
-          "expr": "haproxy_server_up{backend=\"patroni_back\"}",
+          "expr": "haproxy_server_status{proxy=\"patroni_back\",state=\"UP\"}",
           "legendFormat": "{{server}}",
           "instant": true
         }
@@ -273,8 +273,8 @@
       "options": { "legend": { "calcs": ["last", "max"], "displayMode": "table", "placement": "right" } },
       "targets": [
         {
-          "expr": "haproxy_frontend_current_sessions{frontend=\"patroni_front\"}",
-          "legendFormat": "{{frontend}}"
+          "expr": "haproxy_frontend_current_sessions{proxy=\"patroni_front\"}",
+          "legendFormat": "{{proxy}}"
         }
       ]
     },
@@ -293,8 +293,8 @@
       "options": { "legend": { "calcs": ["last", "max"], "displayMode": "table", "placement": "right" } },
       "targets": [
         {
-          "expr": "rate(haproxy_frontend_requests_total{frontend=\"patroni_front\"}[5m])",
-          "legendFormat": "{{frontend}}"
+          "expr": "rate(haproxy_frontend_http_requests_total{proxy=\"patroni_front\"}[5m])",
+          "legendFormat": "{{proxy}}"
         }
       ]
     },

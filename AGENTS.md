@@ -12,7 +12,7 @@ Web UI: http://localhost:80 — `admin@admin.com` / `admin`
 
 ## Architecture
 
-- **3 Patroni nodes** (patroni1-3) — PostgreSQL 17 managed by Patroni, etcd for DCS
+- **3 Patroni nodes** (patroni1-3) — PostgreSQL 18 managed by Patroni, etcd for DCS
 - **HAProxy** — single R/W endpoint to master (`:5432`), stats at `:7000`
 - **pg-physical-replica** (`:5433`) — streaming WAL standby, `pg_basebackup` from HAProxy on first boot
 - **pg-logical-replica** (`:5434`) — logical replication via `shop_pub` publication and `shop_sub` subscription
@@ -151,5 +151,9 @@ Move `.md` files between dirs to track state. Files use frontmatter-style fields
 - `patroni-cluster/replica-logical/entrypoint.sh` — logical replica init
 - `patroni-cluster/pgadmin/servers.json` — pgAdmin auto-registration
 - `patroni-cluster/haproxy/haproxy.cfg` — HAProxy config
-- `README.md` — full docs (474 lines)
+- `README.md` — index (93 lines, links to docs/*)
+- `docs/components.md` — components, architecture, build
+- `docs/replication.md` — DML replication, audit log, slot recovery
+- `docs/maintenance.md` — DDL, indexes, logical replica recovery
+- `docs/monitoring.md` — metrics, known limitations, Windows issues
 - `backlog/README.md` — backlog conventions
