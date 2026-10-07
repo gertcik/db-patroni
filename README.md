@@ -44,6 +44,8 @@
 | 5 | Временные таблицы и хранимые процедуры на физической реплике | ❌ Не выполнено | В upstream PostgreSQL 18 hot standby работает в read-only режиме — `CREATE TEMP TABLE` и DML запрещены. Решение: Postgres Pro Enterprise 18.4.1 с параметрами `enable_standby_temp_tables` + `enable_temp_memory_catalog` ([issues.md](docs/issues.md)) |
 | 6 | Запись имени пользователя при изменении на pg-audit | ⚠️ Ограничение | pgoutput v1 не передаёт имя пользователя в WAL-потоке. `moveusername` всегда `'wal_consumer'`. Решение: колонка `modified_by TEXT DEFAULT current_user` на мастере ([issues.md](docs/issues.md)) |
 
+> **Альтернативы компонентов.** `pg-physical-replica` и `patroni4_readonly` — два альтернативных способа получить физическую read-only копию (вне Patroni по слоту ↔ член Patroni с `nofailover`); `pg-logical-replica` и `pg-audit-consumer` — два альтернативных способа использовать логическую репликацию (копия данных ↔ журнал операций `i/u/d`). В топологии присутствуют все четыре ([components.md](docs/components.md) → «Альтернативные компоненты»).
+
 ## Быстрый старт
 
 ```bash

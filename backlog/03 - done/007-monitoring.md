@@ -1,6 +1,6 @@
 # Мониторинг — Prometheus + Grafana + Exporters
 
-**Статус:** wait
+**Статус:** done
 **Приоритет:** high
 **Создана:** 2026-07-03
 **Дедлайн:**
@@ -136,14 +136,18 @@ groups:
 
 ## DoD
 
-- [ ] Prometheus собирает метрики со всех Patroni-нод (`/metrics`)
-- [ ] postgres_exporter собирает метрики со всех 7 экземпляров PostgreSQL
-- [ ] HAProxy отдаёт метрики в Prometheus (через встроенный prometheus-exporter)
-- [ ] cadvisor собирает метрики со всех контейнеров
-- [ ] Grafana показывает дашборды: PostgreSQL, Patroni, HAProxy, Container Resources
-- [ ] Поведение кластера (failover, лаг, нагрузка) отражается на дашбордах в реальном времени
-- [ ] Всё разворачивается одной командой `docker compose up -d` (новые сервисы)
-- [ ] Не требуется ручная настройка после запуска (autoprovisioning)
+- [x] Prometheus собирает метрики со всех Patroni-нод (`/metrics`) — 4/4 target UP (patroni1/2/3 + patroni4_readonly)
+- [x] postgres_exporter собирает метрики со всех 7 экземпляров PostgreSQL — 7/7 target UP
+- [x] HAProxy отдаёт метрики в Prometheus (через встроенный prometheus-exporter) — frontend `:8405`, target UP
+- [x] cadvisor собирает метрики со всех контейнеров — target UP
+- [x] Grafana показывает дашборды: PostgreSQL, Patroni, HAProxy, Container Resources — 4 дашборда provisioned (postgres 35 панелей, overview 17, haproxy 6, containers 10)
+- [x] Поведение кластера (failover, лаг, нагрузка) отражается на дашбордах в реальном времени — scrape_interval 10s, метрики обновляются
+- [x] Всё разворачивается одной командой `docker compose up -d` (новые сервисы)
+- [x] Не требуется ручная настройка после запуска (autoprovisioning) — datasource + дашборда через `grafana/provisioning/`
+
+## Итог проверки (2026-10-07)
+
+Проверено на живом кластере: 13/13 target UP в Prometheus, Grafana 11.1.0 healthy, datasource Prometheus подключён автопровижинингом, 4 дашборда загружены, 5 alert-правил (`rules/patroni.yml`) health=ok. Попутно исправлены 3 правила, ссылавшиеся на несуществующие метрики: `patroni_master` → `max(patroni_primary) == 0`, `patroni_lag` → `pg_stat_replication_pg_wal_lsn_diff` (по каждому реплику, JDBC walsender исключён из-за NaN), `haproxy_server_up` → `sum(haproxy_server_status{state="UP"}) == 0` (в бэкенде `patroni_back` только лидер проходит чек `/master` — DOWN у реплик это норма, алерт = «нет ни одного UP»).
 
 ## Структура файлов
 

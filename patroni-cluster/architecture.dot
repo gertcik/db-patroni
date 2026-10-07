@@ -39,7 +39,7 @@ digraph G {
     }
 
     subgraph cluster_proxy {
-        label="Proxy / Admin";
+        label="Proxy / Admin / Load";
         style=dashed;
         fillcolor="#fff3e0";
         color="#e65100";
@@ -48,18 +48,19 @@ digraph G {
 
         haproxy [label="HAProxy\n:5432 R/W\nstats :7000", fillcolor="#ffe0b2", shape=cds];
         pgadmin [label="pgAdmin 4\nWeb UI :80", fillcolor="#ffe0b2"];
+        loadgen [label="load-generator\nDML через HAProxy", fillcolor="#ffe0b2"];
     }
 
     subgraph cluster_replicas {
-        label="Replicas (физическая вне Patroni + логическая)";
+        label="Реплики (физическая вне Patroni + логическая)";
         style=dashed;
         fillcolor="#f3e5f5";
         color="#6a1b9a";
         fontcolor="#6a1b9a";
         fontsize=12;
 
-        physical [label="pg-physical-replica\nвне Patroni (нет DCS)\nslot: pg_physical_replica\nStreaming Replica\n:5433", fillcolor="#e1bee7"];
-        logical [label="pg-logical-replica\nPostgreSQL 18\nLogical Replica\n:5434", fillcolor="#e1bee7"];
+        physical [label="pg-physical-replica\nвне Patroni (нет DCS/REST)\nslot: pg_physical_replica\nStreaming Replica\n:5433", fillcolor="#e1bee7"];
+        logical [label="pg-logical-replica\nPostgreSQL 18\nLogical Replica\n:5434\nsubscription: shop_sub", fillcolor="#e1bee7"];
     }
 
     subgraph cluster_audit {
@@ -72,6 +73,20 @@ digraph G {
 
         audit_consumer [label="pg-audit-consumer\nJava 17\nWAL consumer (pgoutput)", fillcolor="#ffccbc"];
         audit_log [label="pg-audit-log\nPostgreSQL 18\nAppend-only Audit\n:5435", fillcolor="#ffccbc"];
+    }
+
+    subgraph cluster_monitoring {
+        label="Мониторинг";
+        style=dashed;
+        fillcolor="#eceff1";
+        color="#455a64";
+        fontcolor="#455a64";
+        fontsize=12;
+
+        prometheus [label="Prometheus\n:9090", fillcolor="#cfd8dc"];
+        grafana [label="Grafana\n:3000", fillcolor="#cfd8dc"];
+        cadvisor [label="cAdvisor\n:8080", fillcolor="#cfd8dc"];
+        exporters [label="7 × postgres_exporter\npatroni1-3, patroni4_readonly,\nphysical, logical, audit", fillcolor="#cfd8dc"];
     }
 
     etcd -> patroni1 [label=" leader election", style=dotted, color="#1565c0"];
@@ -91,13 +106,17 @@ digraph G {
     leader -> patroni4_readonly [label=" pg_basebackup (once)\n streaming WAL (ongoing)", style=bold, color="#6a1b9a"];
 
     haproxy -> logical [label=" logical replication\n pgoutput plugin\n slot: shop_sub", style=bold, color="#6a1b9a"];
-    logical -> haproxy [label=" subscription sync", style=bold, dir=none, color="#6a1b9a"];
 
     haproxy -> audit_consumer [label=" WAL stream\n slot: audit_slot", style=bold, color="#bf360c"];
     audit_consumer -> audit_log [label=" INSERT rows\n (batch commit)", style=bold, color="#bf360c"];
 
+    exporters -> prometheus [label=" scrape :9187/:8008\n (7 targets)", style=dotted, color="#455a64"];
+    prometheus -> grafana [label=" dashboards", style=dotted, color="#455a64"];
+    cadvisor -> prometheus [label=" containers", style=dotted, color="#455a64"];
+
     user [label="Client Apps", shape=plaintext, fontsize=12, fontcolor="gray20"];
     user -> haproxy [label=" :5432", color="#e65100"];
+    loadgen -> haproxy [label=" :5432 (DML)", color="#e65100"];
 
     admin [label="Admin\nBrowser", shape=plaintext, fontsize=12, fontcolor="gray20"];
     admin -> pgadmin [label=" :80", color="#e65100"];

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-07 — Перерисовка диаграммы, чистка backlog, алерты Prometheus, пометка об альтернативах компонентов
+
+### Изменённые файлы
+
+| Файл | Что изменено |
+|------|-------------|
+| `patroni-cluster/architecture.dot` | Добавлены группа «Мониторинг» (Prometheus/Grafana/cAdvisor/7 × postgres_exporter) и узел load-generator с рёбрами; у логической реплики проставлен `subscription: shop_sub`; группа прокси → «Proxy / Admin / Load» |
+| `images/diagram.png` | Перерисован из `architecture.dot` (graphviz 12.2.1, 1675×1179, 230 KB) — полная актуальная топология; содержимое подписей проверено через SVG-рендер |
+| `patroni-cluster/prometheus/rules/patroni.yml` | Исправлены 3 алерта, ссылавшихся на несуществующие метрики (`patroni_master` → `max(patroni_primary) == 0`; `patroni_lag` → `pg_stat_replication_pg_wal_lsn_diff` с исключением JDBC-walsender из-за NaN; `haproxy_server_up` → `sum(haproxy_server_status{state="UP"}) == 0` — в `patroni_back` только лидер проходит чек `/master`, DOWN у реплик это норма); все 5 правил health=ok, активных алертов нет |
+| `backlog/007-monitoring.md`, `backlog/010-replication-tests.md` | Статус `wait` → `done`, DoD отмечен по результатам живой проверки (13/13 target UP, 4 дашборда, `4 passed`, отчёты в `data_tests/reports/`), добавлен «Итог проверки»; перенесены в `backlog/03 - done/` вместе с `009` (статус уже был `done`, но файл лежал в `01 - wait/`) |
+| `docs/components.md` | Новый блок «Альтернативные компоненты»: `pg-physical-replica` ↔ `patroni4_readonly` (два способа физ. read-only копии) и `pg-logical-replica` ↔ `pg-audit-consumer` (два способа логической репликации: копия данных ↔ журнал операций) |
+| `AGENTS.md`, `README.md` | Короткие пометки об этих парах-альтернативах (Architecture / после таблицы требований) |
+
 ## 2026-10-07 — Реорганизация топологии: patroni4_readonly (член Patroni) + pg-physical-replica (вне Patroni)
 
 Вторая физическая реплика переведена из автономной standby (`pg-physical-replica2`) в **член кластера Patroni** `patroni4_readonly` (`tags.nofailover: true`), а `pg-physical-replica` возвращена в статус **plain-реплики вне Patroni** (нет etcd/REST, стриминг через постоянный физический слот `pg_physical_replica`). Хост-порты: `pg-physical-replica` `:5433`, `patroni4_readonly` `:5436`.
@@ -12,7 +25,8 @@
 | `patroni-cluster/replica-physical/entrypoint.sh` | Переписан: guard от записи не туда при `PGDATA != /data/pgdata`; свежий PGDATA → `pg_basebackup` через haproxy + `standby.signal`; существующий PGDATA → идемпотентное добавление `primary_conninfo` (`application_name=pg_physical_replica`) и `primary_slot_name = 'pg_physical_replica'` в `postgresql.auto.conf` |
 | `patroni-cluster/pgadmin/servers.json` | Сервер `"5"`: Patroni4 readonly → `patroni4_readonly`; переимпорт серверов — через wipe named volume `patroni-cluster_pgadmin-data` (не `data/pgadmin`) |
 | `patroni-cluster/prometheus/prometheus.yml` | job `patroni`: 4 цели (patroni1/2/3 + `patroni4_readonly:8008`); job `postgresql`: `pg-exporter-patroni4:9187` (7 целей); `pg-physical-replica:8008` из job `patroni` убран (нет REST) |
-| `patroni-cluster/architecture.dot` | Панель 4 членов Patroni (+nofailover), `pg-physical-replica` в отдельной группе с пометкой слота |
+| `patroni-cluster/architecture.dot` | Панель 4 членов Patroni (+nofailover), `pg-physical-replica` в отдельной группе с пометкой слота; добавлены группа «Мониторинг» (Prometheus/Grafana/cAdvisor/7 × postgres_exporter), load-generator и рёбра мониторинга |
+| `images/diagram.png` | Перерисован из `patroni-cluster/architecture.dot` (graphviz 12.2.1, 1675×1179) — актуальная топология: 4 члена Patroni + plain-реплика по слоту, pgAdmin-сервер `patroni4_readonly`, мониторинг |
 | `patroni-cluster/tests/config.py` | `NOFAILOVER_NODES = ["patroni4_readonly"]` (+ комментарий, что `pg-physical-replica` вне DCS); `tests/test_failover.py`, `tests/README.md` — актуализированы |
 | `AGENTS.md`, `README.md`, `docs/issues.md`, `docs/components.md`, `docs/replication.md`, `docs/maintenance.md`, `docs/replication-tests.md` | Новая топология: 4 узла Patroni + plain-реплика; never-promote → `patroni4_readonly`/`pg-physical-replica`; слот `pg_physical_replica` (permanent, `type: physical`); восстановление реплик; README: добавлен раздел «Источники и материалы» |
 | Живой кластер | DCS-конфиг обновлён через REST `PATCH /config` (slots + `pg_physical_replica`); старый слот `pg_physical_replica2` удалён; `./data/pg_physical` пересоздан с нуля; pgadmin пересоздан на named volume |
