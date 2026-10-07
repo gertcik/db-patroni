@@ -5,13 +5,13 @@
 | Категория | Характеристика | DML (INSERT/UPDATE/DELETE) | DDL (CREATE/ALTER/DROP) | Обслуживание (VACUUM/ANALYZE) |
 |-----------|---------------|---------------------------|------------------------|-------------------------------|
 | **Patroni-кластер** (patroni1/2/3) | Managed by Patroni, автоfailover | **Да** — только на мастере | **Да** — на мастере, автоматически реплицируется | **Да** — на мастере (autovacuum) |
-| **Физическая реплика** (pg-physical-replica) | Streaming WAL, read-only | **Нет** — standby.signal блокирует запись | **Нет** — копия с мастера через WAL | **Нет** — копия с мастера через WAL |
+| **Физические реплики** (patroni4_readonly — член Patroni; pg-physical-replica — вне Patroni) | streaming WAL, read-only | **Нет** — всегда в recovery (`pg_is_in_recovery() = t`) | **Нет** — копия с мастера через WAL | **Нет** — копия с мастера через WAL |
 | **Логическая реплика** (pg-logical-replica) | Logical replication, read-only через подписку | **Нет** — apply worker применяет DML из подписки | **Нет** — DDL не реплицируются, нужен ручной DDL | **Нет** — копия с мастера через WAL |
 | **pg-audit-log** | Append-only аудит-БД (all TEXT, без ограничений) | **Да** — но НЕ на таблицах `bookings.*` (append-only через WAL consumer) | **Да** — но НЕ на таблицах `bookings.*` (схема фиксирована) | **Да** — autovacuum работает, ANALYZE для статистики |
 
 ## Что разрешено и запрещено
 
-| Операция | Patroni-мастер | Patroni-реплики | Физическая реплика | Логическая реплика | pg-audit-log (любые таблицы кроме `bookings.*`) | pg-audit-log (`bookings.*` — аудит-таблицы) |
+| Операция | Patroni-мастер | Patroni-реплики | Физ. реплики (2) | Логическая реплика | pg-audit-log (любые таблицы кроме `bookings.*`) | pg-audit-log (`bookings.*` — аудит-таблицы) |
 |----------|---------------|-----------------|-------------------|-------------------|-----------------------------------------------|---------------------------------------------|
 | INSERT / UPDATE / DELETE | ✅ | ❌ (read-only) | ❌ (read-only) | ❌ (apply worker) | ✅ | ⚠️ только INSERT через WAL consumer |
 | CREATE TABLE / INDEX | ✅ (auto-replicates) | ❌ | ❌ | ⚠️ ручной DDL | ✅ | ❌ |
@@ -33,27 +33,21 @@
 
 1. Создать таблицу на **мастере** Patroni:
    ```sql
-   CREATE TABLE shop.categories (
+   CREATE TABLE bookings.categories (
        id SERIAL PRIMARY KEY,
        name VARCHAR(100) NOT NULL
    );
    ```
-2. На мастер-кластере таблица появится на всех трёх нодах (streaming replication).
-3. Физическая реплика получит таблицу автоматически (WAL streaming).
-4. Для логической реплики — добавить таблицу в publication:
-   ```sql
-   ALTER PUBLICATION shop_pub ADD TABLE shop.categories;
-   ```
-5. На логической реплике таблица появится автоматически (подписка активна).
+2. На мастер-кластере таблица появится на всех нодах (streaming replication).
+3. Физические реплики получат таблицу автоматически (WAL streaming).
+4. Публикация `shop_pub` создана как `FOR ALL TABLES` — новая таблица попадает в неё автоматически, `ALTER PUBLICATION` не нужен.
+5. ⚠️ На логической реплике таблицу нужно создать **вручную** (DDL не реплицируется) — тем же `CREATE TABLE ...`, что и на мастере.
 
 **Удаление таблицы:**
 
-1. `DROP TABLE` на мастере — удалится везде (кроме логической реплики).
-2. Удалить из publication:
-   ```sql
-   ALTER PUBLICATION shop_pub DROP TABLE shop.categories;
-   ```
-3. На логической реплике выполнить `DROP TABLE IF EXISTS shop.categories;`
+1. `DROP TABLE` на мастере — удалится на всех нодах кластера и физических репликах (кроме логической реплики — там удалить вручную).
+2. На логической реплике выполнить `DROP TABLE IF EXISTS bookings.categories;`
+   (из публикации `FOR ALL TABLES` таблица исчезает автоматически вместе с ней).
 
 ## Как добавлять / удалять поля и ограничения
 
@@ -61,16 +55,16 @@
 
 ```sql
 -- добавить поле
-ALTER TABLE shop.users ADD COLUMN phone VARCHAR(20);
+ALTER TABLE bookings.tickets ADD COLUMN contact_phone VARCHAR(20);
 
 -- удалить поле
-ALTER TABLE shop.users DROP COLUMN phone;
+ALTER TABLE bookings.tickets DROP COLUMN contact_phone;
 
 -- добавить ограничение
-ALTER TABLE shop.products ADD CONSTRAINT chk_price CHECK (price > 0);
+ALTER TABLE bookings.bookings ADD CONSTRAINT chk_amount CHECK (total_amount > 0);
 
 -- удалить ограничение
-ALTER TABLE shop.products DROP CONSTRAINT chk_price;
+ALTER TABLE bookings.bookings DROP CONSTRAINT chk_amount;
 ```
 
 1. **Физическая реплика** — изменения применяются автоматически (WAL streaming).
@@ -94,7 +88,12 @@ ALTER TABLE shop.products DROP CONSTRAINT chk_price;
 ALTER SUBSCRIPTION shop_sub DISABLE;
 DROP SUBSCRIPTION shop_sub;
 
--- 2. Создать таблицу заново (такой же DDL, как на мастере)
+-- 2. На ТЕКУЩЕМ лидере (patronictl list): пересоздать слот shop_sub.
+--    DROP SUBSCRIPTION удаляет слот на паблишере, а create_slot = false
+--    в шаге 4 ожидает, что слот уже существует.
+SELECT pg_create_logical_replication_slot('shop_sub','pgoutput');
+
+-- 3. Создать таблицу заново (такой же DDL, как на мастере)
 CREATE TABLE bookings.flights (
     flight_id           SERIAL PRIMARY KEY,
     route_no            TEXT NOT NULL,
@@ -105,7 +104,7 @@ CREATE TABLE bookings.flights (
     actual_arrival      TIMESTAMPTZ
 );
 
--- 3. Пересоздать подписку с copy_data = true (скопирует все существующие данные)
+-- 4. Пересоздать подписку с copy_data = true (скопирует все существующие данные)
 CREATE SUBSCRIPTION shop_sub
 CONNECTION 'host=haproxy port=5432 dbname=shop user=postgres password=secret'
 PUBLICATION shop_pub
@@ -115,27 +114,34 @@ WITH (copy_data = true, create_slot = false);
 **Если испорчено несколько таблиц или вся схема:**
 
 ```sql
--- 1. Удалить подписку
+-- 1. Удалить подписку (заодно удаляется слот shop_sub на паблишере)
 DROP SUBSCRIPTION IF EXISTS shop_sub;
 
--- 2. Удалить и пересоздать всю схему bookings
+-- 2. На ТЕКУЩЕМ лидере пересоздать слот
+SELECT pg_create_logical_replication_slot('shop_sub','pgoutput');
+
+-- 3. Удалить и пересоздать всю схему bookings
 DROP SCHEMA bookings CASCADE;
 -- затем выполнить все CREATE TABLE из patroni-cluster/patroni/demo-airlines.sql
 -- (кроме INSERT — данные скопируются через copy_data)
 
--- 3. Пересоздать подписку
+-- 4. Пересоздать подписку
 CREATE SUBSCRIPTION shop_sub
 CONNECTION 'host=haproxy port=5432 dbname=shop user=postgres password=secret'
 PUBLICATION shop_pub
 WITH (copy_data = true, create_slot = false);
 ```
 
-**Быстрый способ — пересоздать контейнер:**
+**Быстрый способ — пересоздать контейнер (после шагов 1–3 выше):**
 ```bash
 docker compose rm -sf pg-logical-replica
 docker compose up -d pg-logical-replica
 ```
-Контейнер выполнит полную переинициализацию: initdb → создание таблиц → CREATE SUBSCRIPTION с `copy_data = true`.
+Контейнер выполнит повторную инициализацию: уже существующий PGDATA сохраняется
+(initdb не выполняется), создаются только недостающие таблицы (`IF NOT EXISTS`)
+и подписка с `copy_data = true`. Поэтому перед этим нужно удалить старую подписку
+и пересоздать слот `shop_sub` на лидере, иначе entrypoint увидит существующую
+(сломанную) подписку и ничего не исправит.
 
 **Рекомендации по предотвращению:**
 
@@ -154,25 +160,25 @@ docker compose up -d pg-logical-replica
 
 ```sql
 -- создать индекс (на мастере)
-CREATE INDEX idx_users_email ON shop.users(email);
+CREATE INDEX idx_flights_status ON bookings.flights(status);
 
 -- удалить индекс
-DROP INDEX idx_users_email;
+DROP INDEX idx_flights_status;
 ```
 
 1. Физическая реплика получит изменения индексов через WAL.
 2. Логическая реплика НЕ реплицирует DDL индексов — выполнить вручную:
   ```sql
-  CREATE INDEX idx_users_email ON shop.users(email);
+  CREATE INDEX idx_flights_status ON bookings.flights(status);
   ```
 
 ## Обслуживание индексов и таблиц
 
 | Операция | Команда | Когда делать |
 |----------|---------|-------------|
-| VACUUM | `VACUUM (VERBOSE, ANALYZE) shop.users;` | При росте мёртвых кортежей (>20%) |
-| ANALYZE | `ANALYZE shop.users;` | После массовых изменений (>10% строк) |
-| REINDEX | `REINDEX INDEX idx_users_email;` | При разбухании индекса (bloat) |
+| VACUUM | `VACUUM (VERBOSE, ANALYZE) bookings.flights;` | При росте мёртвых кортежей (>20%) |
+| ANALYZE | `ANALYZE bookings.flights;` | После массовых изменений (>10% строк) |
+| REINDEX | `REINDEX INDEX idx_flights_status;` | При разбухании индекса (bloat) |
 
 Autovacuum включён по умолчанию. Наблюдать за статистикой:
 

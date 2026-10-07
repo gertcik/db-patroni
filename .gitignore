@@ -221,3 +221,7 @@ __marimo__/
 patroni-cluster/data/
 patroni-cluster/pg-audit-consumer/.gradle
 patroni-cluster/pg-audit-consumer/build
+patroni-cluster/tests/reports/
+patroni-cluster/data_tests/reports/
+patroni-cluster/tests/.pytest_cache/
+patroni-cluster/tests/__pycache__/

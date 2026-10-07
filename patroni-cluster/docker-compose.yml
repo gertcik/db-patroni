@@ -1,8 +1,8 @@
 # ═══════════════════════════════════════════════════════════════
 # Patroni-кластер PostgreSQL 18
-# - 3 узла Patroni (автоматический failover)
+# - 3 узла Patroni (автоматический failover) + patroni4_readonly (реплика в составе Patroni)
 # - HAProxy (единая точка входа на мастер)
-# - Физическая (streaming) реплика через WAL
+# - Физическая реплика pg-physical-replica (вне Patroni, постоянный слот)
 # - Логическая реплика через publication/subscription
 # - pgAdmin для веб-управления
 # ═══════════════════════════════════════════════════════════════
@@ -75,6 +75,9 @@ services:
                 wal_level: logical                  # Нужен для логической репликации
                 max_worker_processes: 8
             slots:
+              pg_physical_replica:                  # Постоянный слот физической реплики
+                type: physical                      # pg-physical-replica (вне Patroni) стримит
+                                                    # через него; слот переживает failover
               shop_sub:                             # Permanent logical replication slot
                 type: logical                       # Гарантирует, что после failover
                 database: shop                      # логическая реплика не потеряет
@@ -134,6 +137,8 @@ services:
                 wal_level: logical
                 max_worker_processes: 8
             slots:
+              pg_physical_replica:
+                type: physical
               shop_sub:
                 type: logical
                 database: shop
@@ -194,6 +199,8 @@ services:
                 wal_level: logical
                 max_worker_processes: 8
             slots:
+              pg_physical_replica:
+                type: physical
               shop_sub:
                 type: logical
                 database: shop
@@ -213,25 +220,75 @@ services:
     depends_on:
       - etcd
 
-  # ─── Физическая (streaming) реплика ───
-  # Полная копия данных мастера через pg_basebackup.
-  # Стримит WAL через HAProxy (настоящий мастер неизвестен — HAProxy сам направляет).
-  # Не требует DDL на реплике — все изменения приходят через WAL автоматически.
+  # ─── Физическая (streaming) реплика — ВНЕ Patroni ───
+  # Полная копия мастера через pg_basebackup + streaming WAL (см. replica-physical/entrypoint.sh).
+  # НЕ является членом кластера: нет etcd/DCS, нет REST API, не участвует в failover.
+  # Стримит через постоянный слот pg_physical_replica (создаётся Patroni на мастере
+  # из bootstrap.dcs.slots и переживает failover).
   # Доступна на порту 5433 хоста.
   pg-physical-replica:
     build: ./replica-physical
     environment:
-      POSTGRES_PASSWORD: secret          # Пароль локального superuser (postgres) на реплике
-      PGPASSWORD: replicator             # Пароль replicator — для pg_basebackup через HAProxy
-      PGDATA: /var/lib/postgresql/data   # data_directory реплики (НЕ совпадает с Patroni /data/pgdata)
+      PGPASSWORD: replicator               # пароль для pg_basebackup (user=replicator)
+      # В postgres:18 PGDATA по умолчанию = /var/lib/postgresql/18/docker (вне bind-mount)
+      PGDATA: /var/lib/postgresql/data     # явно — чтобы данные попадали в хост-каталог
     ports:
       - "5433:5432"
     volumes:
-      - ./data/pg_physical:/var/lib/postgresql/data
+      - ./data/pg_physical:/var/lib/postgresql/data   # PGDATA контейнера
     networks:
       - patroni-net
     depends_on:
-      - haproxy                         # Ждём HAProxy — pg_basebackup идёт через него
+      - haproxy                            # pg_basebackup идёт через HAProxy (на мастер)
+      - patroni1
+
+  # ─── Физическая реплика в составе Patroni — 4-й узел кластера ───
+  # Полная копия данных мастера через pg_basebackup (делает сам Patroni).
+  # Запускает Patroni, который управляет PostgreSQL как репликой кластера.
+  # Узел НЕ может стать Leader: tags.nofailover=true исключает его из
+  # автоматического выбора лидера при failover.
+  # НЕ выполняет post_bootstrap/init.sh — схема и данные приходят только через WAL.
+  # Доступна на порту 5436 хоста.
+  patroni4_readonly:
+    build: ./patroni
+    environment:
+      PATRONI_CONFIGURATION: |
+        scope: patroni_cluster
+        name: patroni4_readonly
+        restapi:
+          listen: 0.0.0.0:8008
+          connect_address: patroni4_readonly:8008
+          metrics: true
+        postgresql:
+          listen: 0.0.0.0:5432
+          connect_address: patroni4_readonly:5432
+          data_dir: /data/pgdata
+          authentication:
+            superuser:
+              username: postgres
+              password: secret
+            replication:
+              username: replicator
+              password: replicator
+          pg_hba:
+            - local all all trust
+            - host all all 127.0.0.1/32 trust
+            - host all all ::1/128 trust
+            - host all all 0.0.0.0/0 md5
+            - host replication replicator 0.0.0.0/0 md5
+        tags:
+          nofailover: true                # Этот узел никогда не становится лидером
+        etcd:
+          hosts: etcd:2379
+    ports:
+      - "5436:5432"
+    volumes:
+      - ./data/pg_physical2:/data         # data_dir=/data/pgdata (как у Patroni-нод)
+    networks:
+      - patroni-net
+    depends_on:
+      - etcd
+      - patroni1
 
   # ─── Логическая реплика ───
   # Подписывается на publication shop_pub через subscription shop_sub.
@@ -357,7 +414,9 @@ services:
       - "80:80"
     volumes:
       - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
-      - ./data/pgadmin:/var/lib/pgadmin
+      # named volume (не bind): на Windows chown в bind-mount невозможен,
+      # а pgAdmin (uid 5050) должен писать свой data dir (sessions, storage)
+      - pgadmin-data:/var/lib/pgadmin
     networks:
       - patroni-net
     depends_on:
@@ -366,6 +425,7 @@ services:
   # ─── Мониторинг: postgres_exporter (на каждый экземпляр PG) ───
   pg-exporter-patroni1:
     image: prometheuscommunity/postgres-exporter:v0.15.0
+    command: ["--no-collector.stat_bgwriter"]
     environment:
       DATA_SOURCE_NAME: postgresql://postgres:secret@patroni1:5432/shop?sslmode=disable
     networks:
@@ -375,6 +435,7 @@ services:
 
   pg-exporter-patroni2:
     image: prometheuscommunity/postgres-exporter:v0.15.0
+    command: ["--no-collector.stat_bgwriter"]
     environment:
       DATA_SOURCE_NAME: postgresql://postgres:secret@patroni2:5432/shop?sslmode=disable
     networks:
@@ -384,6 +445,7 @@ services:
 
   pg-exporter-patroni3:
     image: prometheuscommunity/postgres-exporter:v0.15.0
+    command: ["--no-collector.stat_bgwriter"]
     environment:
       DATA_SOURCE_NAME: postgresql://postgres:secret@patroni3:5432/shop?sslmode=disable
     networks:
@@ -393,6 +455,7 @@ services:
 
   pg-exporter-physical:
     image: prometheuscommunity/postgres-exporter:v0.15.0
+    command: ["--no-collector.stat_bgwriter"]
     environment:
       DATA_SOURCE_NAME: postgresql://postgres:secret@pg-physical-replica:5432/shop?sslmode=disable
     networks:
@@ -400,8 +463,19 @@ services:
     depends_on:
       - pg-physical-replica
 
+  pg-exporter-patroni4:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    command: ["--no-collector.stat_bgwriter"]
+    environment:
+      DATA_SOURCE_NAME: postgresql://postgres:secret@patroni4_readonly:5432/shop?sslmode=disable
+    networks:
+      - patroni-net
+    depends_on:
+      - patroni4_readonly
+
   pg-exporter-logical:
     image: prometheuscommunity/postgres-exporter:v0.15.0
+    command: ["--no-collector.stat_bgwriter"]
     environment:
       DATA_SOURCE_NAME: postgresql://postgres:secret@pg-logical-replica:5432/shop?sslmode=disable
     networks:
@@ -411,6 +485,7 @@ services:
 
   pg-exporter-audit:
     image: prometheuscommunity/postgres-exporter:v0.15.0
+    command: ["--no-collector.stat_bgwriter"]
     environment:
       DATA_SOURCE_NAME: postgresql://postgres:secret@pg-audit-log:5432/shop?sslmode=disable
     networks:
@@ -471,6 +546,51 @@ services:
     networks:
       - patroni-net
 
+  # ─── Тесты репликации (pytest) ───
+  # Запускаются вручную через: docker compose run --rm replication-tests
+  # (profile 'tests' — чтобы `up -d` НЕ запускал тесты автоматически:
+  #  failover-тест останавливает контейнер лидера).
+  # Работают по живому кластеру (HAProxy :5432, физическая реплика, pg-audit-log).
+  # failover-тест управляет контейнерами через /var/run/docker.sock.
+  # Отчёты выгружаются в ./data_tests/reports (HTML + Allure-результаты + JSON).
+  replication-tests:
+    profiles: ["tests"]
+    build: ./tests
+    environment:
+      TEST_MASTER_HOST: haproxy
+      TEST_MASTER_PORT: "5432"
+      TEST_PHYS_HOST: pg-physical-replica
+      TEST_PHYS_PORT: "5432"
+      TEST_AUDIT_HOST: pg-audit-log
+      TEST_AUDIT_PORT: "5432"
+      TEST_LOGICAL_HOST: pg-logical-replica
+      TEST_LOGICAL_PORT: "5432"
+      TEST_DB: shop
+      TEST_USER: postgres
+      TEST_PASSWORD: secret
+      REPORTS_DIR: /reports
+      # Время (сек) ожидания возврата остановленного лидера в строй после
+      # failover (best-effort, узел может вновь стать лидером или пройти
+      # pg_rewind/rejoin репликой). Не влияет на основной результат теста.
+      TEST_REJOIN_TIMEOUT: "120"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data_tests/reports:/reports
+    networks:
+      - patroni-net
+    depends_on:
+      - haproxy
+      - patroni1
+      - patroni2
+      - patroni3
+      - pg-physical-replica
+      - pg-logical-replica
+      - pg-audit-log
+      - pg-audit-consumer
+
 networks:
   patroni-net:
     driver: bridge
+
+volumes:
+  pgadmin-data:

@@ -6,7 +6,7 @@
 backlog/
 ├── 01 - wait/       # задачи ожидают начала работы
 ├── 02 - work/       # задачи в процессе выполнения
-├── 03 - finisher/   # завершённые задачи
+├── 03 - done/   # завершённые задачи
 └── README.md
 ```
 
@@ -22,9 +22,9 @@ Move-Item "backlog/01 - wait/002-task.md" "backlog/02 - work/002-task.md"
 ```
 
 ### Завершить задачу
-Перемести файл из `02 - work/` в `03 - finisher/`:
+Перемести файл из `02 - work/` в `03 - done/`:
 ```
-Move-Item "backlog/02 - work/002-task.md" "backlog/03 - finisher/002-task.md"
+Move-Item "backlog/02 - work/002-task.md" "backlog/03 - done/002-task.md"
 ```
 
 ### Просмотр задач по статусу
@@ -36,7 +36,7 @@ Get-ChildItem "backlog/01 - wait/*.md" | Sort-Object Name
 Get-ChildItem "backlog/02 - work/*.md" | Sort-Object Name
 
 # завершённые
-Get-ChildItem "backlog/03 - finisher/*.md" | Sort-Object Name
+Get-ChildItem "backlog/03 - done/*.md" | Sort-Object Name
 ```
 
 ## Структура файла задачи (.md)
@@ -46,7 +46,7 @@ Get-ChildItem "backlog/03 - finisher/*.md" | Sort-Object Name
 ```markdown
 # Название задачи
 
-**Статус:** wait | work | finisher
+**Статус:** wait | work | done
 **Приоритет:** high | medium | low
 **Создана:** ГГГГ-ММ-ДД
 **Дедлайн:** ГГГГ-ММ-ДД (опционально)

@@ -171,6 +171,27 @@ WAL consumer (`pg-audit-consumer`) использует replication-проток
 
 **Текущее состояние:** `moveusername` — константа `'wal_consumer'`. Если требуется точное имя пользователя — использовать вариант 1 (колонка на мастере).
 
+### `postgres_exporter` и PostgreSQL 18: collector `stat_bgwriter`
+
+`postgres_exporter` v0.15.0 по умолчанию включает встроенный collector `stat_bgwriter`, который выполняет запрос к представлению `pg_stat_bgwriter` с колонкой `checkpoints_timed`. В PostgreSQL 18 эта колонка была **переименована в `checkpoints`**, поэтому экспортер логирует ошибку:
+
+```
+ERROR:  column "checkpoints_timed" does not exist at character 10
+STATEMENT: SELECT checkpoints_timed, checkpoints_req, ... FROM pg_stat_bgwriter;
+```
+
+Ошибка появляется на **всех** `pg-exporter-*` сервисах каждый цикл скрейпа. Это не сбой кластера, а несовместимость мониторинга с PG18.
+
+**Решение (применено в `docker-compose.yml`):** отключить проблемный collector флагом команды у каждого экспортера:
+```yaml
+pg-exporter-patroni1:
+  image: prometheuscommunity/postgres-exporter:v0.15.0
+  command: ["--no-collector.stat_bgwriter"]
+```
+Флаг `--no-collector.stat_bgwriter` гарантированно отключает `stat_bgwriter` (проверено: env-переменная `PG_EXPORTER_COLLECTOR_STAT_BGWRITER=false` в этом образе НЕ срабатывала, работает именно аргумент команды). Остальные коллекторы (stat_database, wal, процесс, активность и др.) продолжают работать.
+
+**Примечание:** дашборд `postgres.json` ссылается на метрики `pg_stat_bgwriter_*` (например `pg_stat_bgwriter_buffers_alloc_total`). После отключения коллектора эти панели могут не отображать данные; при необходимости их следует перевести на кастомный запрос с новыми именами колонок PG18 (`checkpoints`, `checkpoints_req` и т.д.).
+
 ## Проблемы на Windows
 
 ### Медленный fsync и crash recovery

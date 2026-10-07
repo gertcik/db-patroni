@@ -22,16 +22,20 @@ digraph G {
     }
 
     subgraph cluster_patroni {
-        label="Patroni Cluster (PostgreSQL 18)";
+        label="Patroni Cluster (PostgreSQL 18) — 4 члена (3 leader-capable + nofailover)";
         style=dashed;
         fillcolor="#e8f5e9";
         color="#2e7d32";
         fontcolor="#2e7d32";
         fontsize=12;
 
-        patroni1 [label="patroni1\nPostgreSQL 18\nREST API :8008", fillcolor="#c8e6c9"];
-        patroni2 [label="patroni2\nPostgreSQL 18\nREST API :8008", fillcolor="#c8e6c9"];
-        patroni3 [label="patroni3\nPostgreSQL 18\nREST API :8008", fillcolor="#c8e6c9"];
+        patroni1 [label="patroni1\nPostgreSQL 18\nREST API :8008\nleader-capable", fillcolor="#c8e6c9"];
+        patroni2 [label="patroni2\nPostgreSQL 18\nREST API :8008\nleader-capable", fillcolor="#c8e6c9"];
+        patroni3 [label="patroni3\nPostgreSQL 18\nREST API :8008\nleader-capable", fillcolor="#c8e6c9"];
+        patroni4_readonly [label="patroni4_readonly\nPostgreSQL 18\nREST API :8008\nnofailover: true\n:5436", fillcolor="#c8e6c9"];
+
+        // Абстракция: любой из patroni1/2/3 в роли текущего лидера (WAL source)
+        leader [label="текущий Leader\n(WAL source)", shape=note, fillcolor="#fff9c4", fontcolor="#f57f17"];
     }
 
     subgraph cluster_proxy {
@@ -47,14 +51,14 @@ digraph G {
     }
 
     subgraph cluster_replicas {
-        label="External Replicas";
+        label="Replicas (физическая вне Patroni + логическая)";
         style=dashed;
         fillcolor="#f3e5f5";
         color="#6a1b9a";
         fontcolor="#6a1b9a";
         fontsize=12;
 
-        physical [label="pg-physical-replica\nPostgreSQL 18\nStreaming Replica\n:5433", fillcolor="#e1bee7"];
+        physical [label="pg-physical-replica\nвне Patroni (нет DCS)\nslot: pg_physical_replica\nStreaming Replica\n:5433", fillcolor="#e1bee7"];
         logical [label="pg-logical-replica\nPostgreSQL 18\nLogical Replica\n:5434", fillcolor="#e1bee7"];
     }
 
@@ -73,6 +77,7 @@ digraph G {
     etcd -> patroni1 [label=" leader election", style=dotted, color="#1565c0"];
     etcd -> patroni2 [label=" leader election", style=dotted, color="#1565c0"];
     etcd -> patroni3 [label=" leader election", style=dotted, color="#1565c0"];
+    etcd -> patroni4_readonly [label=" DCS member (nofailover)", style=dotted, color="#1565c0"];
 
     patroni1 -> haproxy [label=" REST /master", style=dotted, color="#e65100"];
     patroni2 -> haproxy [label=" REST /master", style=dotted, color="#e65100"];
@@ -82,8 +87,8 @@ digraph G {
     haproxy -> patroni2 [label=" R/W queries", dir=both, color="#2e7d32"];
     haproxy -> patroni3 [label=" R/W queries", dir=both, color="#2e7d32"];
 
-    haproxy -> physical [label=" pg_basebackup (once)\n streaming WAL (ongoing)", style=bold, color="#6a1b9a"];
-    physical -> haproxy [label=" WAL stream", style=bold, dir=none, color="#6a1b9a"];
+    leader -> physical [label=" pg_basebackup (once)\n streaming WAL via slot\n pg_physical_replica", style=bold, color="#6a1b9a"];
+    leader -> patroni4_readonly [label=" pg_basebackup (once)\n streaming WAL (ongoing)", style=bold, color="#6a1b9a"];
 
     haproxy -> logical [label=" logical replication\n pgoutput plugin\n slot: shop_sub", style=bold, color="#6a1b9a"];
     logical -> haproxy [label=" subscription sync", style=bold, dir=none, color="#6a1b9a"];

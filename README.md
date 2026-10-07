@@ -1,6 +1,6 @@
 # Patroni Cluster — PostgreSQL 18 + Patroni + pgAdmin
 
-Отказоустойчивый кластер PostgreSQL 18 (3 ноды) с Patroni, etcd, haproxy и pgAdmin в Docker Compose.
+Отказоустойчивый кластер PostgreSQL 18 (Patroni: 3 leader-capable + 1 реплика `nofailover` в составе кластера + 1 физическая реплика вне Patroni) с etcd, haproxy и pgAdmin в Docker Compose.
 
 ![Диаграмма кластера](images/diagram.png)
 
@@ -11,6 +11,7 @@
 3. [Обслуживание БД](docs/maintenance.md) — DDL, индексы, восстановление логической реплики
 4. [Мониторинг и ограничения](docs/monitoring.md) — метрики, проверки репликации, проблемы на Windows, `moveusername`
 5. [Известные проблемы](docs/issues.md) — ограничения hot standby (физическая реплика), Postgres Pro Enterprise 18.4.1
+6. [Тесты репликации](docs/replication-tests.md) — описание тестов (pytest/docker) и как их запускать
 
 ## Требования
 
@@ -25,7 +26,7 @@
 
 | Компонент | Версия | Где используется | Трассировка |
 |-----------|--------|------------------|-------------|
-| PostgreSQL | 18 | Patroni-кластер (3 ноды), физическая реплика, логическая реплика, pg-audit-log | `patroni-cluster/patroni/Dockerfile`, `replica-physical/`, `replica-logical/`, `pg-audit-log/` |
+| PostgreSQL | 18 | Patroni-кластер (4 ноды), физическая реплика, логическая реплика, pg-audit-log | `patroni-cluster/patroni/Dockerfile`, `replica-physical/`, `replica-logical/`, `pg-audit-log/` |
 | Patroni | 4.1.3 | Управление HA, failover, выборы лидера | `patroni-cluster/patroni/Dockerfile` (аргумент `PATRONI_VERSION`) |
 | etcd | 3.5+ | DCS — хранение состояния кластера | `patroni-cluster/docker-compose.yml` (сервис `etcd`) |
 | HAProxy | 2.9+ | Балансировка, маршрутизация R/W → мастер | `patroni-cluster/haproxy/haproxy.cfg` |
@@ -36,9 +37,9 @@
 
 | # | Требование | Статус | Комментарий |
 |---|------------|--------|-------------|
-| 1 | Patroni-кластер из 3 нод с отказоустойчивостью | ✅ Выполнено | 3 ноды (patroni1/2/3), etcd DCS, HAProxy маршрутизирует R/W → мастер. При падении мастера — автоматический failover, HAProxy переключает на новую ноду ([components.md](docs/components.md)) |
+| 1 | Patroni-кластер из 4 нод с отказоустойчивостью | ✅ Выполнено | 4 ноды (patroni1/2/3 leader-capable + patroni4_readonly `nofailover`), etcd DCS, HAProxy маршрутизирует R/W → мастер. При падении мастера — автоматический failover, HAProxy переключает на новую ноду ([components.md](docs/components.md)) |
 | 2 | Логическая репликация из Patroni с восстановлением при смене лидера | ✅ Выполнено | Слот `shop_sub` — permanent DCS slot, автоматически создаётся на новом мастере. Подписка `shop_sub` на pg-logical-replica, `copy_data = true` ([replication.md](docs/replication.md)) |
-| 3 | Физическая репликация с восстановлением при смене лидера | ✅ Выполнено | pg-physical-replica подключается к HAProxy через `primary_conninfo`, стримит WAL. Слот не используется — при смене мастера HAProxy маршрутизирует трафик, реплика переподключается автоматически ([replication.md](docs/replication.md)) |
+| 3 | Физическая репликация с восстановлением при смене лидера | ✅ Выполнено | Две физические реплики: `patroni4_readonly` (`:5436`) — член Patroni (`nofailover: true`); `pg-physical-replica` (`:5433`) — **вне Patroni** (нет etcd/REST), стримит через постоянный физический слот `pg_physical_replica`. При смене лидера обе автоматически следуют за новым мастером ([replication.md](docs/replication.md)) |
 | 4 | Логическая репликация в аудит-БД через WAL Consumer (Java) | ✅ Выполнено | Слот `audit_slot` — permanent DCS slot. pg-audit-consumer (Java 17, Gradle 8.7) потребляет WAL через SQL-интерфейс, пишет в pg-audit-log. Слот автоматически восстанавливается при смене лидера ([replication.md](docs/replication.md)) |
 | 5 | Временные таблицы и хранимые процедуры на физической реплике | ❌ Не выполнено | В upstream PostgreSQL 18 hot standby работает в read-only режиме — `CREATE TEMP TABLE` и DML запрещены. Решение: Postgres Pro Enterprise 18.4.1 с параметрами `enable_standby_temp_tables` + `enable_temp_memory_catalog` ([issues.md](docs/issues.md)) |
 | 6 | Запись имени пользователя при изменении на pg-audit | ⚠️ Ограничение | pgoutput v1 не передаёт имя пользователя в WAL-потоке. `moveusername` всегда `'wal_consumer'`. Решение: колонка `modified_by TEXT DEFAULT current_user` на мастере ([issues.md](docs/issues.md)) |
@@ -82,9 +83,10 @@ for m in d['members']:
 
 Вывод:
 ```
-patroni1    → replica   (running)
-patroni2    → leader    (running)
-patroni3    → replica   (running)
+patroni1              → leader    (running)
+patroni2              → replica   (running)
+patroni3              → replica   (running)
+patroni4_readonly     → replica   (running)   (nofailover)
 ```
 
 ### 3. Через patronictl
@@ -102,11 +104,11 @@ docker compose exec patroni2 patronictl list
 ### Статус Patroni
 
 ```bash
-# любой нодой
-curl -s http://localhost:5001/patroni | jq .
+# REST API любой ноды (порт 8008 не проброшен на хост — команда выполняется внутри контейнера)
+docker compose exec patroni1 curl -s http://localhost:8008/patroni
 
 # кластер
-docker exec patroni-cluster-patroni1-1 patronictl list
+docker compose exec patroni1 patronictl list
 ```
 
 ### Подключение к БД
@@ -115,8 +117,12 @@ docker exec patroni-cluster-patroni1-1 patronictl list
 # через haproxy (всегда на мастер)
 psql -h localhost -p 5432 -U postgres -d shop
 
-# напрямую к ноде (patroni1 — 5001, patroni2 — 5002, patroni3 — 5003)
-psql -h localhost -p 5001 -U postgres -d shop
+# физические реплики (только чтение)
+psql -h localhost -p 5433 -U postgres -d shop   # pg-physical-replica (вне Patroni)
+psql -h localhost -p 5436 -U postgres -d shop   # patroni4_readonly (member, nofailover)
+
+# напрямую к узлу patroni1/2/3 — хост-портов нет, только внутри Docker:
+docker compose exec patroni1 psql -U postgres -d shop
 ```
 
 Пароль: `secret`
@@ -124,9 +130,8 @@ psql -h localhost -p 5001 -U postgres -d shop
 ### Тестовые данные
 
 ```sql
-SELECT * FROM users;
-SELECT * FROM products;
-SELECT * FROM orders;
+SELECT count(*) FROM bookings.flights;
+SELECT * FROM bookings.airports_data LIMIT 5;
 ```
 
 ### pgAdmin
@@ -136,7 +141,7 @@ SELECT * FROM orders;
 1. **Email:** admin@admin.com
 2. **Password:** admin
 
-Сервер `Patroni Cluster (via haproxy)` уже зарегистрирован.
+Сервер `Patroni Cluster (via haproxy)` уже зарегистрирован (всего 5 серверов — см. `docs/components.md`).
 
 ### Тест отказоустойчивости
 
@@ -154,6 +159,18 @@ psql -h localhost -p 5432 -U postgres -d shop -c "SELECT inet_server_addr();"
 # вернуть ноду
 docker compose start patroni1
 ```
+
+## Источники и материалы
+
+- [Patroni — документация](https://patroni.readthedocs.io/) — REST API, параметры, permanent slots (`bootstrap.dcs.slots`)
+- [PostgreSQL 18 — логическая репликация](https://www.postgresql.org/docs/18/logical-replication.html) — PUB/SUB, слоты
+- [PostgreSQL 18 — hot standby](https://www.postgresql.org/docs/18/hot-standby.html) — read-only реплики
+- [HAProxy — настройка балансировки](https://www.haproxy.org/documentation/) — health-check, маршрутизация R/W
+- [etcd — документация](https://etcd.io/docs/) — DCS для Patroni
+- [Docker Compose — справочник](https://docs.docker.com/compose/) — сервисы, сети, named volumes
+- [postgrespro/demodb](https://github.com/postgrespro/demodb) — демо-данные авиационной БД (схема соответствует `demo-airlines.sql`)
+- [Habr — обновление PostgreSQL 18](https://habr.com/ru/companies/postgrespro/articles/870660/) — новые возможности PG18
+- [pgAdmin — документация](https://www.pgadmin.org/docs/) — веб-интерфейс управления
 
 ## Остановка
 

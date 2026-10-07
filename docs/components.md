@@ -63,12 +63,13 @@ docker compose up -d
 | Компонент | Роль | Порт (хост) | Зависит от |
 |-----------|------|-------------|------------|
 | etcd | Хранилище состояния кластера (DCS) | 2379 | — |
-| patroni1 | Нода БД #1 | 5001 (Patroni API) | etcd |
-| patroni2 | Нода БД #2 | 5002 (Patroni API) | etcd |
-| patroni3 | Нода БД #3 | 5003 (Patroni API) | etcd |
+| patroni1 | Нода БД #1 (leader-capable) | — (REST :8008 только в сети) | etcd |
+| patroni2 | Нода БД #2 (leader-capable) | — (REST :8008 только в сети) | etcd |
+| patroni3 | Нода БД #3 (leader-capable) | — (REST :8008 только в сети) | etcd |
 | haproxy | R/W балансировщик к мастеру | 5432 (PG), 7000 (stats) | patroni1-3 (:8008) |
 | pgAdmin | Веб-интерфейс управления БД | 80 | haproxy (:5432) |
-| pg-physical-replica | Физическая standby (полная копия, WAL streaming) | 5433 | haproxy (:5432) |
+| patroni4_readonly | Физическая standby — **4-й узел Patroni** (полная копия, WAL streaming, `nofailover: true`) | 5436 | etcd, текущий лидер |
+| pg-physical-replica | Физическая standby — **вне Patroni** (нет etcd/REST :8008, стриминг по физическому слоту `pg_physical_replica`) | 5433 | haproxy (:5432), постоянный слот |
 | pg-logical-replica | Логическая реплика (PUB/SUB, подмножество таблиц) | 5434 | haproxy (:5432) |
 | pg-audit-log | Аудит-БД (append-only, без ограничений целостности) | 5435 | — |
 | pg-audit-consumer | WAL consumer (Java 17, pgoutput v1) | — | haproxy (:5432), pg-audit-log (:5435) |
@@ -88,7 +89,7 @@ docker compose up -d
 Каждая нода запускает два процесса внутри одного контейнера:
 
 1. **PostgreSQL 18** — слушает порт 5432 (внутри сети Docker). На мастере принимает запись, на репликах — read-only.
-2. **Patroni** — управляет жизненным циклом PostgreSQL: запуск, остановка, рестарт, promotion/demotion. REST API на порту 8008 (внутри Docker, проброшен на хост как 5001/5002/5003).
+2. **Patroni** — управляет жизненным циклом PostgreSQL: запуск, остановка, рестарт, promotion/demotion. REST API на порту 8008 (внутри Docker; хост-портов у patroni1/2/3 нет — доступ через `docker compose exec` или HAProxy).
 
 **Как Patroni управляет PG:**
 
@@ -120,7 +121,7 @@ Patroni слушает порт 8008 (внутри Docker) для проверо
 
 1. Единый порт для клиентов (:5432) — клиенту не нужно знать, какая нода мастер.
 2. Прозрачный failover — при смене мастера HAProxy переключается за ~2 секунды (проверка каждые 1s, 2 failed checks = мастер недоступен). Клиент просто переподключается.
-3. WAL-routing — физическая реплика подключается к `host=haproxy port=5432`, не зная адреса текущего мастера.
+3. WAL-routing — физическая реплика получает адрес текущего лидера из DCS (etcd) и переподключается к нему сама, без ручной перенастройки после failover.
 
 ### pgAdmin
 
@@ -129,29 +130,61 @@ Patroni слушает порт 8008 (внутри Docker) для проверо
 1. Авторизация: `admin@admin.com` / `admin`
 2. При старте автоматически импортирует серверы из `pgadmin/servers.json`:
    1. **Patroni Cluster (via haproxy)** — подключение к `haproxy:5432`, база `shop`
-   2. **pg-physical-replica** — подключение к `pg-physical-replica:5432`, база `shop`
-   3. **pg-logical-replica** — подключение к `pg-logical-replica:5432`, база `shop`
-   4. **pg-audit-log** — подключение к `pg-audit-log:5432`, база `postgres`
+   2. **Physical Replica** — подключение к `pg-physical-replica:5432`, база `shop`
+   3. **Logical Replica** — подключение к `pg-logical-replica:5432`, база `shop`
+   4. **Audit DB (pg-audit-log)** — подключение к `pg-audit-log:5432`, база `shop`
+   5. **Patroni4 readonly (patroni4_readonly)** — подключение к `patroni4_readonly:5432`, база `shop`
 
-### pg-physical-replica
+### patroni4_readonly (4-й узел Patroni)
 
-Полная физическая копия кластера PostgreSQL — **streaming WAL standby**.
+Полная физическая копия кластера PostgreSQL — **4-й узел Patroni** (streaming WAL standby, `:5436` на хосте).
+
+`patroni4_readonly` — полноправный член `scope: patroni_cluster` (тот же etcd DCS и свой REST API `:8008`), но с `tags.nofailover: true`.
 
 **Как инициализируется:**
 
-1. При первом запуске выполняет **разовую** операцию `pg_basebackup` через HAProxy (`host=haproxy port=5432`), получая полную бинарную копию данных текущего мастера. При последующих перезапусках эта операция **пропускается**.
-2. Создаёт `standby.signal` — переводит PG в режим hot standby (read-only).
-3. Настраивает `primary_conninfo` на `host=haproxy port=5432` — реплика постоянно стримит WAL с текущего мастера, не зная его адреса.
-4. При рестарте (второй и последующие запуски) сразу запускает standby без повторного `pg_basebackup`.
+1. Узел запускает **Patroni** (образ `./patroni`), который при первом запуске с пустым `data_dir` делает **NodeBaseBackup** от текущего мастера и настраивает streaming replication через DCS.
+2. Узел работает в режиме hot standby (read-only).
+3. **НЕ выполняет `post_bootstrap`/`init.sh`** — схема и данные приходят только через WAL с мастера.
+4. При рестарте (второй и последующие запуски) сразу запускает standby и продолжает стриминг WAL, следуя за лидером через DCS.
+
+**Как гарантируется "never leader":**
+
+- `tags.nofailover: true` в конфигурации узла (`PATRONI_CONFIGURATION` в `docker-compose.yml`) — исключает из **автоматического** выбора лидера при failover. Даже если узел самый свежий (лаг 0), Patroni не изберёт его лидером.
+- ⚠️ **Нельзя** вызывать `patronictl promote patroni4_readonly` вручную — это нарушит гарантию.
+
+### pg-physical-replica (вне Patroni)
+
+Полная физическая копия кластера PostgreSQL — **не член Patroni** (никакого etcd / REST :8008 / `patronictl list`), `:5433` на хосте. Стриминг WAL через **постоянный физический слот `pg_physical_replica`** (объявлен в `bootstrap.dcs.slots` → создаётся на всех нодах и пересоздаётся на новом лидере после failover).
+
+**Как инициализируется:**
+
+1. Образ собирается из `./replica-physical` (базовый `postgres:18`, свой `entrypoint.sh`, **не** `./patroni`).
+2. При пустом `PGDATA` (`./data/pg_physical`) делает **`pg_basebackup` через HAProxy** (`:5432` → текущий мастер), ставит `standby.signal`.
+3. В `postgresql.auto.conf` дописываются `primary_conninfo` (`application_name=pg_physical_replica`) и `primary_slot_name = 'pg_physical_replica'`.
+4. При существующем `PGDATA` entrypoint идемпотентно дописывает те же `primary_conninfo`/`primary_slot_name` (повторное создание контейнера не ломает реплику).
+
+**Как гарантируется "never leader":**
+
+- Узел работает только как hot standby: `standby.signal` + подключение к мастеру через слот. Promote-команды Patroni к нему неприменимы (не член кластера).
+- ⚠️ **Никогда** не включать для него `wal_level=hot_standby`-promote вручную — назначение узла только read-only.
+
+**Особенности эксплуатации:**
+
+- При смене мастера реплика **не перестраивается** — она читает WAL из своего физического слота, который Patroni переносит на нового лидера. Ручных шагов не требуется.
+- Если реплика стояла долго и её слот указывает на удалённый WAL — узел перестанет получать данные. Лечится пересозданием через basebackup (см. «Восстановление реплики» ниже); слот `pg_physical_replica` при этом **трогать не нужно**, он сохранится в DCS.
+- `PGDATA` контейнера обязан быть `/var/lib/postgresql/data` (сообщается через env в `docker-compose.yml`) — в образе `postgres:18` по умолчанию другой путь, и бекап уходит в анонимный volume.
 
 **Какие данные реплицируются:** все базы, таблицы, индексы, DDL, VACUUM, sequence changes — через двоичный WAL. Полная идентичность мастеру.
 
-**Для чего используется:**
+**Для чего используются:**
 1. Offload тяжёлых SELECT-запросов (отчёты, аналитика) с мастера.
 2. Резервное копирование (pg_dump, pg_basebackup с реплики не нагружает мастер).
-3. Hot standby для быстрого переключения при отказе мастера.
+3. Hot standby для быстрого переключения при отказе мастера (при этом никогда не становится лидером сам).
 
-**Ограничение:** только чтение — `standby.signal` блокирует любую запись.
+**Ограничение:** только чтение — узел всегда в recovery (`pg_is_in_recovery() = t`), запись заблокирована. При сбое/порче пересоздаётся:
+- `patroni4_readonly` — `docker compose rm -sf patroni4_readonly && docker compose up -d patroni4_readonly` (данные в `./data/pg_physical2`; при необходимости — `patronictl reinit patroni4_readonly`);
+- `pg-physical-replica` — `docker compose rm -sf pg-physical-replica`, опционально очистить `./data/pg_physical/*`, `docker compose up -d pg-physical-replica` (новый `pg_basebackup` через HAProxy); без wipe сначала пробовать slot-based rebuild (см. `docs/monitoring.md`).
 
 ### pg-logical-replica
 
@@ -222,7 +255,7 @@ Java 17 приложение, которое читает логический �
 
 **Retry при недоступности аудит-БД:**
 1. Если pg-audit-log временно недоступен, consumer не пересоздаёт replication stream (избегая потери данных), а повторяет попытки записи с exponential backoff.
-2. При переподключении к мастеру (например, после failover) слот `audit_slot` уже существует на новом мастере (permanent slot в Patroni), consumer просто перезапускает чтение.
+2. При переподключении к мастеру (например, после failover) слот `audit_slot` уже существует на новом мастере (permanent slot в Patroni), consumer просто перезапускает чтение. Если слот «протух» (его позиция указывает на удалённый WAL, ошибка `requested WAL segment ... has already been removed`) — слот пересоздаётся, см. `docs/replication.md` → «Когда нужно ручное вмешательство».
 
 **Сборка:** Gradle 8.7, Java 17, fat JAR (`shadowJar`). Multi-stage Docker build.
 
@@ -233,9 +266,9 @@ Java 17 приложение, которое читает логический �
 Стек состоит из четырёх уровней:
 
 1. **DCS (etcd)** — координация кластера, leader election
-2. **Patroni (3 ноды)** — управление PostgreSQL, автоматический failover
+2. **Patroni (4 ноды)** — управление PostgreSQL, автоматический failover: 3 leader-capable (patroni1/2/3) + 1 физическая реплика `patroni4_readonly` с `nofailover: true` (плюс `pg-physical-replica` — физическая standby вне Patroni)
 3. **HAProxy** — единая точка входа (always-on мастер), health-check через REST API
-4. **Реплики** — внешние экземпляры PostgreSQL для разных задач
+4. **Реплики** — физические (`patroni4_readonly` — член Patroni, `pg-physical-replica` — вне Patroni) и логическая реплика для разных задач
 
 ## Как работает кластер
 
@@ -243,10 +276,10 @@ Java 17 приложение, которое читает логический �
 
 ### Выбор мастера (leader election)
 
-1. Все три ноды Patroni регистрируются в etcd.
+1. Четыре ноды Patroni регистрируются в etcd; избрать лидером можно только `patroni1/2/3` (у `patroni4_readonly` стоит `nofailover: true`). `pg-physical-replica` в выборах не участвует — она вне Patroni.
 2. Нода, которая первой успешно создаёт ключ `/service/patroni_cluster/leader`, становится **мастером** (принимает запись).
 3. Остальные ноды становятся **репликами** (только чтение) и запускают `pg_basebackup` с мастера, после чего начинают стриминг WAL.
-4. Если мастер падает, Patroni через etcd определяет потерю лидера, и одна из реплик автоматически повышается до мастера.
+4. Если мастер падает, Patroni через etcd определяет потерю лидера, и одна из **leader-capable** реплик (patroni1/2/3) автоматически повышается до мастера.
 
 ### Маршрутизация через HAProxy
 

@@ -13,6 +13,7 @@ scrape_configs:
           - patroni1:8008
           - patroni2:8008
           - patroni3:8008
+          - patroni4_readonly:8008
     metrics_path: /metrics
 
   - job_name: postgresql
@@ -22,6 +23,7 @@ scrape_configs:
           - pg-exporter-patroni2:9187
           - pg-exporter-patroni3:9187
           - pg-exporter-physical:9187
+          - pg-exporter-patroni4:9187
           - pg-exporter-logical:9187
           - pg-exporter-audit:9187
 

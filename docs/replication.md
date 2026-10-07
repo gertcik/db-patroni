@@ -19,25 +19,32 @@ DML-операции (INSERT, UPDATE, DELETE) проходят по трём н�
 3. Реплики Patroni **read-only** — DML на них не выполняется.
 4. Задержка репликации отслеживается через `pg_stat_replication`.
 
-### 2. Физическая реплика (pg-physical-replica :5433)
+### 2. Физические реплики (patroni4_readonly :5436, pg-physical-replica :5433)
 
 ```
-Мастер Patronи → HAProxy :5432 → pg-physical-replica
-                                    ↓
-                          WAL streaming (standby)
-                                    ↓
-                          Read-only копия данных
+Мастер Patroni → Patroni DCS (etcd) → patroni4_readonly   (:5436, член Patroni, nofailover)
+                        └──────────→ pg-physical-replica   (:5433, вне Patroni, слот pg_physical_replica)
+                                         ↓
+                      NodeBaseBackup / pg_basebackup (первый запуск)
+                                         ↓
+                      WAL streaming (standby, от текущего лидера)
+                                         ↓
+                      Read-only копия данных
 ```
 
-1. После `pg_basebackup` реплика подключается к HAProxy (`host=haproxy port=5432`) с `primary_conninfo` и постоянно стримит WAL.
-2. Все DML с мастера попадают на физическую реплику **автоматически**, включая DDL, VACUUM, CREATE INDEX и т.д.
-3. Реплика **read-only** — запись заблокирована на уровне `standby.signal`.
-4. Лаг репликации можно проверить:
-  ```sql
-  SELECT application_name, state,
-         pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS lag
-  FROM pg_stat_replication;
-  ```
+1. **`patroni4_readonly`** — полноправный 4-й узел кластера Patroni (`scope: patroni_cluster`, тот же etcd DCS, свой REST API `:8008`). При первом запуске Patroni делает **NodeBaseBackup** от текущего мастера, затем постоянно стримит WAL.
+2. **`pg-physical-replica`** — **не член Patroni** (нет etcd/REST, не видна в `patronictl list`). Стандартный `pg_basebackup` через HAProxy + стриминг по **постоянному физическому слоту `pg_physical_replica`**. Слот объявлен в `bootstrap.dcs.slots` (в DCS) и переносится на нового лидера после failover автоматически.
+3. Обе реплики никогда не избираются лидером: у `patroni4_readonly` — `tags.nofailover: true`; у `pg-physical-replica` — она вообще вне кластера Patroni (физически не может промоутиться командой Patroni). Оба требования read-only.
+4. Все DML с мастера попадают на физические реплики **автоматически**, включая DDL, VACUUM, CREATE INDEX и т.д.
+5. Реплики **read-only** — запись заблокирована (`pg_is_in_recovery() = t`).
+6. При смене мастера `patroni4_readonly` переключается через DCS; `pg-physical-replica` продолжает читать свой слот `pg_physical_replica` на новом лидере (Patroni создаёт его там) — ручных шагов не нужно.
+7. ⚠️ **Нельзя** выполнять `patronictl promote patroni4_readonly`. `pg-physical-replica` — не член кластера, promote к ней неприменим; не включать её в запись никогда.
+8. Лаг репликации проверяется как и для остальных узлов:
+   ```sql
+   SELECT application_name, state,
+          pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS lag
+   FROM pg_stat_replication;
+   ```
 
 ### 3. Логическая реплика (pg-logical-replica :5434)
 
@@ -45,14 +52,14 @@ DML-операции (INSERT, UPDATE, DELETE) проходят по трём н�
 Мастер Patronи → HAProxy :5432 → pg-logical-replica
                                     ↓
                     Logical replication (PUB/SUB)
-                    Publication: shop_pub (таблицы users, products, orders)
+                    Publication: shop_pub (FOR ALL TABLES, schema bookings)
                     Subscription: shop_sub (слот shop_sub)
                                     ↓
                     DML применяется к соответствующим таблицам
 ```
 
-1. Логическая реплика подписывается на **публикацию** `shop_pub`, созданную на мастере в `patroni-cluster/patroni/init.sh:49-57`.
-2. Публикация включает таблицы: `users`, `products`, `orders`.
+1. Логическая реплика подписывается на **публикацию** `shop_pub`, созданную на мастере в `patroni-cluster/patroni/init.sh`.
+2. Публикация `shop_pub` создана как `FOR ALL TABLES` — новые таблицы схемы `bookings` попадают в репликацию автоматически.
 3. Подписка `shop_sub` использует постоянный слот `shop_sub`, который автоматически создаётся на каждом новом мастере благодаря настройке `bootstrap.dcs.slots` в конфигурации Patroni.
 4. **Реплицируется только DML** (INSERT, UPDATE, DELETE) на подписанных таблицах. DDL, индексы, sequences, VACUUM и TRUNCATE **не реплицируются**.
 5. Направление репликации — **однонаправленное**: только с мастера на логическую реплику. Изменения на логической реплике **не попадают** обратно на мастер.
@@ -62,7 +69,7 @@ DML-операции (INSERT, UPDATE, DELETE) проходят по трём н�
 
 ### Сводная таблица
 
-| Операция | Patroni-реплики | Физическая реплика | Логическая реплика |
+| Операция | Patroni-реплики | Физические реплики (обе) | Логическая реплика |
 |----------|----------------|-------------------|-------------------|
 | INSERT / UPDATE / DELETE | Да (через WAL) | Да (через WAL) | Да (через PUB/SUB) |
 | DDL (ALTER TABLE, CREATE INDEX) | Да (через WAL) | Да (через WAL) | **Нет** |
@@ -72,12 +79,12 @@ DML-операции (INSERT, UPDATE, DELETE) проходят по трём н�
 
 ### Как проверить, что DML реплицируется
 
-**Физическая реплика (:5433):**
+**Физические реплики (pg-physical-replica :5433, patroni4_readonly :5436):**
 ```sql
 -- проверить, что данные есть
-SELECT count(*) FROM shop.users;
+SELECT count(*) FROM bookings.flights;
 
--- проверить статус streaming
+-- проверить статус streaming (на мастере)
 SELECT application_name, state, sync_state FROM pg_stat_replication;
 ```
 
@@ -185,7 +192,7 @@ gradle test           # только тесты
 
 ## Восстановление слотов репликации при смене лидера
 
-При failover или switchover в кластере Patroni меняется мастер-нода. Два логических слота репликации — `shop_sub` (логическая реплика) и `audit_slot` (WAL consumer) — должны автоматически восстановиться на новом мастере, чтобы downstream-компоненты не потеряли данные.
+При failover или switchover в кластере Patroni меняется мастер-нода. Слоты репликации — `shop_sub` (логическая реплика), `audit_slot` (WAL consumer) и `pg_physical_replica` (plain-физическая реплика) — должны автоматически восстановиться на новом мастере, чтобы downstream-компоненты не потеряли данные.
 
 ### Как настроены слоты
 
@@ -201,6 +208,8 @@ slots:
     type: logical
     database: shop
     plugin: pgoutput
+  pg_physical_replica:
+    type: physical
 ```
 
 Patroni хранит эту конфигурацию в etcd и при каждом выборе нового лидера выполняет следующее.
@@ -210,7 +219,7 @@ Patroni хранит эту конфигурацию в etcd и при кажд�
 1. Старый мастер падает или выводится из кластера.
 2. etcd освобождает ключ лидера (после истечения TTL, по умолчанию 30 секунд).
 3. Одна из реплик побеждает в выборах и становится новым мастером.
-4. Patroni на новом мастере считывает `bootstrap.dcs.slots` из etcd и создаёт слоты `shop_sub` и `audit_slot`, если они ещё не существуют.
+4. Patroni на новом мастере считывает `bootstrap.dcs.slots` из etcd и создаёт слоты `shop_sub`, `audit_slot` и `pg_physical_replica`, если они ещё не существуют.
 5. Patroni копирует информацию о слотах на standby-ноды через `pg_replication_slot_advance()`, чтобы при будущем failover позиция слотов была актуальной.
 
 ### Поведение каждого слота после failover
@@ -218,11 +227,24 @@ Patroni хранит эту конфигурацию в etcd и при кажд�
 | Слот | Кто использует | Автовосстановление | Особенности |
 |------|---------------|---------------------|-------------|
 | `shop_sub` | pg-logical-replica (apply worker) | **Да** — Patroni создаёт слот на новом мастере | Apply worker автоматически переподключается через HAProxy к новому мастеру. Если через 5 минут `pg_stat_subscription` пуст — перезапустить подписку (DISABLE → ENABLE). |
-| `audit_slot` | pg-audit-consumer (Java WAL consumer) | **Да** — Patroni создаёт слот на новом мастере | Consumer переподключается к HAProxy и начинает чтение с позиции слота. Ручное вмешательство не требуется. |
+| `audit_slot` | pg-audit-consumer (Java WAL consumer) | **Да** — Patroni создаёт слот на новом мастере | Consumer переподключается к HAProxy и начинает чтение с позиции слота. Ручное вмешательство не требуется, **кроме** случая протухшего слота (см. «Когда нужно ручное вмешательство»). |
+| `pg_physical_replica` | pg-physical-replica (plain replica, вне Patroni) | **Да** — Patroni создаёт слот на новом мастере | `type: physical`. Реплика читает WAL из этого слота, при смене лидера просто продолжает стриминг. Если слот указывает на удалённый WAL (реплика долго стояла) — пересоздать реплику basebackup-ом (слот в DCS не трогать). |
 
 ### Физическая репликация
 
-Физическая реплика (`pg-physical-replica`) **не использует слоты** — она подключается к HAProxy через `primary_conninfo` и стримит WAL напрямую. При смене мастера HAProxy автоматически маршрутизирует трафик на нового мастера, реплика переподключается без участия оператора.
+Физические реплики — `patroni4_readonly` `:5436` (**член Patroni**, `tags.nofailover: true`) и `pg-physical-replica` `:5433` (**вне Patroni**, стриминг по физическому слоту `pg_physical_replica`). Они **не используют логические слоты**. Обе никогда не избираются лидером. При смене мастера `patroni4_readonly` переключается через DCS, `pg-physical-replica` — читает слот `pg_physical_replica`, перенесённый Patroni на нового лидера.
+
+При сбое/порче данных реплика восстанавливается пересозданием контейнера:
+```bash
+# patroni4_readonly (NodeBaseBackup от мастера, данные в ./data/pg_physical2)
+docker compose rm -sf patroni4_readonly
+docker compose up -d patroni4_readonly
+
+# pg-physical-replica (pg_basebackup через HAProxy, данные в ./data/pg_physical)
+docker compose rm -sf pg-physical-replica
+Remove-Item -Recurse -Force "patroni-cluster/data/pg_physical/*"   # только при полном сбросе данных
+docker compose up -d pg-physical-replica
+```
 
 ### Когда нужно ручное вмешательство
 
@@ -233,16 +255,25 @@ Patroni хранит эту конфигурацию в etcd и при кажд�
    ALTER SUBSCRIPTION shop_sub ENABLE;
    ```
 2. **Слот удалён из-за `max_slot_wal_keep_size`** — если мастер хранил недостаточно WAL и слот был удалён автоматически, логическая реплика требует пересоздания подписки с `copy_data = true`.
+3. **Слот указывает на удалённый WAL** — после нескольких failover/смен TL `restart_lsn` permanent-слота может остаться на позиции, чьи WAL-сегменты уже удалены. Признак: consumer/apply worker зациклен с ошибкой `requested WAL segment ... has already been removed`; `pg_replication_slot_advance()` на этом слоте падает с той же ошибкой. Восстановление — пересоздать слот (старая позиция не читается, события между старой и новой позицией теряются):
+   ```bash
+   docker compose stop pg-audit-consumer
+   # на текущем лидере (см. patronictl list):
+   docker compose exec patroni3 psql -U postgres -d shop -c \
+     "SELECT pg_drop_replication_slot('audit_slot'); SELECT pg_create_logical_replication_slot('audit_slot','pgoutput');"
+   docker compose start pg-audit-consumer
+   ```
+   Для `shop_sub` — то же самое (`pgoutput`), либо пересоздание подписки (см. Logical replica corruption в `AGENTS.md`).
 
 ### Проверка слотов после failover
 
 ```sql
--- на новом мастере: существуют ли слоты
+-- на новом мастере: существуют ли слоты (у физического слота confirmed_flush_lsn отсутствует)
 SELECT slot_name, slot_type, database, active
 FROM pg_replication_slots
-WHERE slot_name IN ('shop_sub', 'audit_slot');
+WHERE slot_name IN ('shop_sub', 'audit_slot', 'pg_physical_replica');
 
--- отставание слотов
+-- отставание логических слотов
 SELECT slot_name,
        pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)) AS lag
 FROM pg_replication_slots
