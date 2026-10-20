@@ -24,7 +24,7 @@ No lint/typecheck/CI in this repo — the only automated verification is the rep
 - **Альтернативы** (пары взаимозаменяемых подходов, см. `docs/components.md` → «Альтернативные компоненты»): `pg-physical-replica` ↔ `patroni4_readonly` (обе физ. read-only: вне Patroni по слоту ↔ член Patroni с `nofailover`); `pg-logical-replica` ↔ `pg-audit-consumer` (логическая репликация данных ↔ журнал операций `i/u/d`). В топологии присутствуют все четыре — это не дубли, а разные способы/задачи.
 - **pg-audit-log** `:5435` + **pg-audit-consumer** — Java 17 WAL consumer reading slot `audit_slot`.
 - **load-generator** (DML via HAProxy), **pgAdmin** `:80`, **Prometheus** `:9090` / **Grafana** `:3000` / **cadvisor** `:8080`, 7 × postgres_exporter (one per PG instance: patroni1-3, patroni4_readonly, physical replica, logical, audit). All on Docker network `patroni-net`.
-- Host PG ports **read-only**: `pg-physical-replica` `:5433`, `patroni4_readonly` `:5436`; `patroni1/2/3` expose **no host ports** — connect via HAProxy, pgAdmin or `docker compose exec`. (README's stale `users/products/orders` examples are corrected to the `bookings.*` schema.)
+- Host PG ports **read-only**: `pg-physical-replica` `:5433`, `patroni4_readonly` `:5436`; `patroni1/2/3` expose **no host ports** — connect via HAProxy, pgAdmin or `docker compose exec`.
 - Logical slots `shop_sub` + `audit_slot` + physical slot `pg_physical_replica` are **permanent slots** in `bootstrap.dcs.slots` (`docker-compose.yml`) → created on every node, recreated on the new leader after failover. `pg_physical_replica` has `type: physical` — keep it in the list, do not drop it (the plain replica's `primary_slot_name` depends on it).
 
 ## Tests
@@ -40,7 +40,7 @@ docker compose run --rm replication-tests test_replication.py::test_insert_repli
 ```
 
 - The suite creates/drops `bookings.repl_test` on the master, in pg-audit-log and on pg-logical-replica (session fixture — the logical mirror is mandatory: `FOR ALL TABLES` does not make the subscriber create new tables, and the apply worker crash-loops on the first `INSERT`). The failover test **stops the leader container** via `/var/run/docker.sock` (mounted in the service; host Docker API must be ≥ 1.44).
-- Reports land in `patroni-cluster/data_tests/reports/` (bind mount in `docker-compose.yml`). `tests/README.md` and `docs/replication-tests.md` say `tests/reports/` — stale; trust compose.
+- Reports land in `patroni-cluster/data_tests/reports/` (bind mount in `docker-compose.yml`) — both `tests/README.md` and `docs/replication-tests.md` agree; dir is git-ignored.
 - The service has `profiles: ["tests"]` in `docker-compose.yml` — `docker compose up -d` does not start it; explicit `build`/`run replication-tests` still work.
 - Env overrides (e.g. `-e TEST_REJOIN_TIMEOUT=180`) are defined on the `replication-tests` service in `docker-compose.yml`.
 
@@ -54,7 +54,7 @@ docker compose run --rm replication-tests test_replication.py::test_insert_repli
 | Failover test | `docker compose stop <master>`, later `docker compose start <master>` |
 | Physical lag (on master) | `SELECT application_name, state, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS lag FROM pg_stat_replication;` |
 | Logical slot lag (`shop_sub`, `audit_slot`) | `SELECT slot_name, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)) AS lag FROM pg_replication_slots WHERE slot_type = 'logical';` |
-| Apply lag on logical replica | `SELECT subname, pg_size_pretty(pg_wal_lsn_diff(latest_end_lsn, application_lsn)) AS lag FROM pg_stat_subscription;` |
+| Apply worker on logical replica (health + lag) | `SELECT subname, worker_type, pg_size_pretty(pg_wal_lsn_diff(latest_end_lsn, received_lsn)) AS lag FROM pg_stat_subscription;` — нет колонки `application_lsn` в PG18; worker отсутствует в выводе → apply worker мёртв (см. Maintenance) |
 | Audit consumer logs | `docker compose logs pg-audit-consumer` |
 | Rebuild Patroni nodes with another version | `docker compose build --build-arg PATRONI_VERSION=4.1.5` (ARG in `patroni/Dockerfile`, default `4.1.3`) |
 | Full reset | `docker compose down -v` **+ delete `patroni-cluster/data/`** — PGDATA lives in bind mounts, `-v` does not remove them (see `_clean_data.cmd`) |
@@ -64,6 +64,8 @@ More monitoring SQL: `docs/monitoring.md`.
 ## Database conventions
 
 - App DB `shop`, schema `bookings` — 9 tables: `airplanes_data, airports_data, seats, routes, flights, bookings, tickets, segments, boarding_passes`. Created by `patroni/init.sh` (post_bootstrap) from `demo-airlines.sql`.
+- Audited tables (WAL consumer writes on UPDATE/DELETE) need `REPLICA IDENTITY FULL` — `init.sh` sets it only for `seats` and `segments`; a table without it breaks the consumer on UPDATE/DELETE (tests create `repl_test` with it).
+- Audit mirror types: `pg-audit-consumer` auto-aligns audit table column types to the master on first WAL touch (`pg_catalog.format_type` + CREATE/ALTER per table, `init-audit.sql` has the same static DDL). Tables dropped from the master are skipped with `[WARN]` (no crash-loop on stale WAL history).
 - Publication `shop_pub` is `FOR ALL TABLES` → tables created later are included automatically on the **publisher** (no `ALTER PUBLICATION` needed), but the **subscriber does not create them** (observed: no sync worker) — create new tables manually on pg-logical-replica too (the tests fixture does this for `repl_test`).
 - Users: `postgres` / `secret` (superuser), `replicator` / `replicator` (replication). `wal_level: logical`.
 - Slots `shop_sub` + `audit_slot` (logical) and `pg_physical_replica` (physical, for the plain replica) are **permanent slots** in `bootstrap.dcs.slots` (`docker-compose.yml`) → recreated on the new leader after failover; subscriber/consumer/replica reconnect by themselves. Adding a slot: add it under `bootstrap.dcs.slots` (or `patronictl edit-config`), then create the subscription with `create_slot = false`.
@@ -113,6 +115,6 @@ Move the `.md` file between dirs to track state (dir names contain spaces — qu
 - `patroni-cluster/patroni/` — `Dockerfile` (ARG `PATRONI_VERSION`), `init.sh` (post_bootstrap DDL, demo data, publication), `demo-airlines.sql`
 - `patroni-cluster/replica-logical/entrypoint.sh` — logical replica init (fresh vs. re-setup branch)
 - `patroni-cluster/replica-physical/` — plain physical replica init (pg_basebackup via haproxy + physical slot)
-- `patroni-cluster/haproxy/haproxy.cfg`, `pgadmin/servers.json`, `prometheus/`, `grafana/provisioning/`, `load-generator/`, `pg-audit-consumer/`
+- `patroni-cluster/haproxy/haproxy.cfg`, `pgadmin/servers.json`, `prometheus/`, `grafana/provisioning/`, `load-generator/`, `pg-audit-consumer/` (Gradle `build.gradle` — README's `build.gradle.kts` is a typo)
 - `patroni-cluster/tests/` — replication test suite (run.sh → pytest + HTML/Allure reports)
-- `README.md` (index) · `docs/` — components, replication, maintenance, monitoring, issues, replication-tests · `changes.md` (changelog)
+- `README.md` (index) · `docs/` — setup (чек-лист развёртывания с нуля: Patroni+HA, настройки PostgreSQL, слоты, аудит-реплика+consumer), components, replication, maintenance, monitoring, issues, replication-faq, replication-tests · `changes.md` (changelog)

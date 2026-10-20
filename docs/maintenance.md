@@ -7,7 +7,7 @@
 | **Patroni-кластер** (patroni1/2/3) | Managed by Patroni, автоfailover | **Да** — только на мастере | **Да** — на мастере, автоматически реплицируется | **Да** — на мастере (autovacuum) |
 | **Физические реплики** (patroni4_readonly — член Patroni; pg-physical-replica — вне Patroni) | streaming WAL, read-only | **Нет** — всегда в recovery (`pg_is_in_recovery() = t`) | **Нет** — копия с мастера через WAL | **Нет** — копия с мастера через WAL |
 | **Логическая реплика** (pg-logical-replica) | Logical replication, read-only через подписку | **Нет** — apply worker применяет DML из подписки | **Нет** — DDL не реплицируются, нужен ручной DDL | **Нет** — копия с мастера через WAL |
-| **pg-audit-log** | Append-only аудит-БД (all TEXT, без ограничений) | **Да** — но НЕ на таблицах `bookings.*` (append-only через WAL consumer) | **Да** — но НЕ на таблицах `bookings.*` (схема фиксирована) | **Да** — autovacuum работает, ANALYZE для статистики |
+| **pg-audit-log** | Append-only аудит-БД (типы зеркальны с мастером, без ограничений) | **Да** — но НЕ на таблицах `bookings.*` (append-only через WAL consumer) | **Да** — но НЕ на таблицах `bookings.*` (типы выравнивает pg-audit-consumer по источнику) | **Да** — autovacuum работает, ANALYZE для статистики |
 
 ## Что разрешено и запрещено
 

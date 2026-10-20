@@ -70,12 +70,12 @@ WHERE slot_name IN ('shop_sub', 'audit_slot');
 На **логической реплике** — статус подписки и отставание apply worker:
 
 ```sql
--- отставание apply (разница между последним полученным LSN из WAL мастера
--- и последним применённым на логической реплике)
-SELECT subname,
-       latest_end_lsn,
-       application_lsn,
-       pg_size_pretty(pg_wal_lsn_diff(latest_end_lsn, application_lsn)) AS apply_lag_bytes
+-- статус apply worker: subname/worker_type в выводе = worker жив.
+-- Колонки application_lsn в PG18 нет: полный лаг считать по confirmed_flush_lsn
+-- слота shop_sub на мастере (см. выше).
+SELECT subname, worker_type, pid,
+       received_lsn, latest_end_lsn,
+       pg_size_pretty(pg_wal_lsn_diff(latest_end_lsn, received_lsn)) AS apply_lag_bytes
 FROM pg_stat_subscription;
 
 -- статус apply worker

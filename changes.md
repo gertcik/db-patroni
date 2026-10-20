@@ -1,5 +1,52 @@
 # Changelog
 
+## 2026-10-20 — Инструкция по развёртыванию (docs/setup.md) + актуализация доков после задачи 012
+
+### Что сделано
+
+- Новый документ **`docs/setup.md`** — пошаговый чек-лист развёртывания с нуля: (1) Patroni + HA (etcd, PATRONI_CONFIGURATION, HAProxy health-check `/master`), (2) настройки PostgreSQL (только через DCS: `wal_level=logical`, `max_worker_processes`, `use_pg_rewind`, REPLICA IDENTITY FULL), (3) аудит-реплика + pg-audit-consumer пошагово (build/up, env-таблица consumer, end-to-end проверка с SQL), плюс перечень всех SQL-скриптов с описанием, блок permanent-слотов, сводка учёток/портов, финальный чек-лист и Windows-заметки.
+- README.md: `docs/setup.md` первым в списке документации; AGENTS.md: добавлен в перечень docs/.
+
+### Изменённые файлы
+
+| Файл | Что изменено |
+|------|-------------|
+| `docs/setup.md` | **Новый** — чек-лист развёртывания (Patroni+HA / настройки PostgreSQL / аудит-реплика+consumer) |
+| `docs/components.md` | Раздел pg-audit-log: убрано «все колонки TEXT», описаны зеркальные типы + авто-выравнивание consumer'ом |
+| `docs/maintenance.md` | Таблица категорий: pg-audit-log «all TEXT» → «типы зеркальны с мастером» |
+| `README.md`, `AGENTS.md` | Ссылки на `docs/setup.md` |
+
+## 2026-10-20 — Задача 012: зеркальные типы колонок в аудит-БД (pg-audit-consumer + init-audit.sql), актуализация запросов лага репликации
+
+### Что сделано
+
+- Причина «всё TEXT» в pg-audit-log: `init-audit.sql` создавал таблицы с колонками `TEXT`, а consumer писал `setString` по всем колонкам без проверки схемы приёмника.
+- Задача из backlog: [012-problem-replicar.md](backlog/03%20-%20done/012-problem-replicar.md) (статус done).
+
+### Изменённые файлы
+
+| Файл | Что изменено |
+|------|-------------|
+| `patroni-cluster/pg-audit-consumer/src/main/java/com/audit/consumer/AuditWriter.java` | Зеркалирование схемы: при первом появлении таблицы в WAL читаются типы колонок источника (`pg_catalog.format_type` через отдельное JDBC-соединение к мастеру) и приводится audit-таблица: `CREATE TABLE` (нет таблицы), `ALTER COLUMN ... TYPE ... USING (col::тип)` (тип отличается), `ADD COLUMN` (колонка добавлена у источника); таблицы, удалённые из источника, пропускаются с `[WARN]` (не crash-loop). INSERT'ы с явными кастами по колонкам `CAST(? AS <тип>)`. DDL коммитится сразу, кэш SQL на таблицу. |
+| `patroni-cluster/pg-audit-consumer/src/main/java/com/audit/consumer/App.java` | `connectTarget(cfg, sourceUrl)` — доп. соединение к источнику для метаданных зеркала |
+| `patroni-cluster/pg-audit-consumer/src/test/java/com/audit/consumer/AuditWriterTest.java` | Тесты `buildInsertSqlWithTypes` (CAST по типам) и fallback на `?` для колонок без известного типа |
+| `patroni-cluster/pg-audit-log/init-audit.sql` | Зеркальные типы вместо TEXT: `CHAR(3)`, `INTEGER`, `INTEGER[]`, `TIME`, `INTERVAL`, `TIMESTAMPTZ`, `NUMERIC(10,2)`, `BOOLEAN` — NULL, без NOT NULL/DEFAULT/констрейнтов (служебные `movedate`/`moveusername`/`moveaction`/`id_identity` — как было) |
+| `docs/replication.md` | Раздел про аудит: зеркальные типы, авто-выравнивание consumer'ом, примеры INSERT с CAST |
+| `docs/monitoring.md` | Запрос `pg_stat_subscription` актуализирован под PG18 (колонки `application_lsn` нет — через `latest_end_lsn`/`received_lsn`; полный лаг по слоту на мастере) |
+| `AGENTS.md` | Помечено авто-зеркалирование типов аудита + корректный запрос лага apply worker |
+| `backlog/03 - done/012-problem-replicar.md` | Задача закрыта: причина, решение, live-проверка (42/42 колонки OK, 4/4 replication-tests passed) |
+
+### Результаты верификации (2026-10-20)
+
+| Проверка | Статус | Детали |
+|----------|--------|--------|
+| Юнит-тесты consumer | OK | 17/17 (gradle:8.7-jdk17 в docker) |
+| Миграция живой БД аудита | OK | существующие TEXT-таблицы выровнены ALTER'ами автоматически после пересборки/пересоздания consumer |
+| Сравнение типов мастер↔аудит (9 таблиц, 42 колонки) | OK | 42/42 OK (`character(3)`, `integer`, `integer[]`, `time`, `interval`, `timestamptz`, `numeric(10,2)`, `boolean`, `text`) |
+| Данные типизированы | OK | `days_of_week` = `{1,3,5}`, `duration` = `01:30:00`, `price` = `numeric(10,2)` и т.д. |
+| replication-tests | OK | 4/4 passed (DML i/u/d + failover), отчёт в `data_tests/reports/` |
+| Логи consumer | OK | Aligned/Create/ WARN как ожидается, без ERROR |
+
 ## 2026-10-07 — Перерисовка диаграммы, чистка backlog, алерты Prometheus, пометка об альтернативах компонентов
 
 ### Изменённые файлы

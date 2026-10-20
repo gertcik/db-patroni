@@ -67,7 +67,7 @@ public class App {
 
         waitForSlot(cfg);
 
-        var writer = connectTarget(cfg);
+        var writer = connectTarget(cfg, sourceUrl(cfg));
 
         try (writer) {
             var decoder = new PgOutputDecoder();
@@ -112,12 +112,18 @@ public class App {
         }
     }
 
-    static AuditWriter connectTarget(Config cfg) throws InterruptedException {
+    static String sourceUrl(Config cfg) {
+        return "jdbc:postgresql://" + cfg.sourceHost + ":" + cfg.sourcePort + "/" + cfg.sourceDb;
+    }
+
+    /** Подключение к приёмнику + отдельное соединение к источнику (метаданные для зеркала типов). */
+    static AuditWriter connectTarget(Config cfg, String sourceUrl) throws InterruptedException {
         while (true) {
             try {
                 return new AuditWriter(
                         "jdbc:postgresql://" + cfg.targetHost + ":" + cfg.targetPort + "/" + cfg.targetDb,
-                        cfg.targetUser, cfg.targetPassword
+                        cfg.targetUser, cfg.targetPassword,
+                        sourceUrl, cfg.sourceUser, cfg.sourcePassword
                 );
             } catch (SQLException e) {
                 System.err.println("[ERROR] Cannot connect to audit target: " + e.getMessage());

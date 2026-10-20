@@ -5,11 +5,19 @@ WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'shop')\gexec
 
 CREATE SCHEMA IF NOT EXISTS bookings;
 
+-- Зеркало типов исходных таблиц (схема bookings, patroni/demo-airlines.sql).
+-- Колонки НЕ Primary Key, без NOT NULL/DEFAULT/CONSTRAINT — только типы.
+-- Метаданные аудита (movedate/moveusername/moveaction/id_identity) — свои.
+-- pg-audit-consumer дополнительно выравнивает типы при старте (ALTER COLUMN TYPE),
+-- поэтому старые TEXT-колонки конвертируются автоматически.
+
+-- audit-consumer доработан и теперь САМ создаёт таблицу и добавляет поля, если видит новые
+/*
 CREATE TABLE IF NOT EXISTS bookings.airplanes_data (
-    airplane_code TEXT,
+    airplane_code CHAR(3),
     model         TEXT,
-    range         TEXT,
-    speed         TEXT,
+    range         INTEGER,
+    speed         INTEGER,
     movedate      TIMESTAMP DEFAULT CURRENT_DATE,
     moveusername   TEXT DEFAULT 'wal_consumer',
     moveaction    TEXT,
@@ -17,7 +25,7 @@ CREATE TABLE IF NOT EXISTS bookings.airplanes_data (
 );
 
 CREATE TABLE IF NOT EXISTS bookings.airports_data (
-    airport_code TEXT,
+    airport_code CHAR(3),
     name         TEXT,
     city         TEXT,
     country      TEXT,
@@ -29,7 +37,7 @@ CREATE TABLE IF NOT EXISTS bookings.airports_data (
 );
 
 CREATE TABLE IF NOT EXISTS bookings.seats (
-    airplane_code   TEXT,
+    airplane_code   CHAR(3),
     seat_no         TEXT,
     fare_conditions TEXT,
     movedate        TIMESTAMP DEFAULT CURRENT_DATE,
@@ -40,12 +48,12 @@ CREATE TABLE IF NOT EXISTS bookings.seats (
 
 CREATE TABLE IF NOT EXISTS bookings.routes (
     route_no           TEXT,
-    departure_airport  TEXT,
-    arrival_airport    TEXT,
-    airplane_code      TEXT,
-    days_of_week       TEXT,
-    scheduled_time     TEXT,
-    duration           TEXT,
+    departure_airport  CHAR(3),
+    arrival_airport    CHAR(3),
+    airplane_code      CHAR(3),
+    days_of_week       INTEGER[],
+    scheduled_time     TIME,
+    duration           INTERVAL,
     movedate           TIMESTAMP DEFAULT CURRENT_DATE,
     moveusername        TEXT DEFAULT 'wal_consumer',
     moveaction         TEXT,
@@ -53,13 +61,13 @@ CREATE TABLE IF NOT EXISTS bookings.routes (
 );
 
 CREATE TABLE IF NOT EXISTS bookings.flights (
-    flight_id           TEXT,
+    flight_id           INTEGER,
     route_no            TEXT,
     status              TEXT,
-    scheduled_departure TEXT,
-    scheduled_arrival   TEXT,
-    actual_departure    TEXT,
-    actual_arrival      TEXT,
+    scheduled_departure TIMESTAMPTZ,
+    scheduled_arrival   TIMESTAMPTZ,
+    actual_departure    TIMESTAMPTZ,
+    actual_arrival      TIMESTAMPTZ,
     movedate            TIMESTAMP DEFAULT CURRENT_DATE,
     moveusername         TEXT DEFAULT 'wal_consumer',
     moveaction          TEXT,
@@ -67,9 +75,9 @@ CREATE TABLE IF NOT EXISTS bookings.flights (
 );
 
 CREATE TABLE IF NOT EXISTS bookings.bookings (
-    book_ref      TEXT,
-    book_date     TEXT,
-    total_amount  TEXT,
+    book_ref      CHAR(6),
+    book_date     TIMESTAMPTZ,
+    total_amount  NUMERIC(10,2),
     movedate      TIMESTAMP DEFAULT CURRENT_DATE,
     moveusername   TEXT DEFAULT 'wal_consumer',
     moveaction    TEXT,
@@ -78,10 +86,10 @@ CREATE TABLE IF NOT EXISTS bookings.bookings (
 
 CREATE TABLE IF NOT EXISTS bookings.tickets (
     ticket_no      TEXT,
-    book_ref       TEXT,
+    book_ref       CHAR(6),
     passenger_id   TEXT,
     passenger_name TEXT,
-    outbound       TEXT,
+    outbound       BOOLEAN,
     movedate       TIMESTAMP DEFAULT CURRENT_DATE,
     moveusername    TEXT DEFAULT 'wal_consumer',
     moveaction     TEXT,
@@ -90,9 +98,9 @@ CREATE TABLE IF NOT EXISTS bookings.tickets (
 
 CREATE TABLE IF NOT EXISTS bookings.segments (
     ticket_no       TEXT,
-    flight_id       TEXT,
+    flight_id       INTEGER,
     fare_conditions TEXT,
-    price           TEXT,
+    price           NUMERIC(10,2),
     movedate        TIMESTAMP DEFAULT CURRENT_DATE,
     moveusername     TEXT DEFAULT 'wal_consumer',
     moveaction      TEXT,
@@ -101,12 +109,13 @@ CREATE TABLE IF NOT EXISTS bookings.segments (
 
 CREATE TABLE IF NOT EXISTS bookings.boarding_passes (
     ticket_no      TEXT,
-    flight_id      TEXT,
+    flight_id      INTEGER,
     seat_no        TEXT,
-    boarding_no    TEXT,
-    boarding_time  TEXT,
+    boarding_no    INTEGER,
+    boarding_time  TIMESTAMPTZ,
     movedate       TIMESTAMP DEFAULT CURRENT_DATE,
     moveusername    TEXT DEFAULT 'wal_consumer',
     moveaction     TEXT,
     id_identity    BIGINT GENERATED ALWAYS AS IDENTITY
 );
+*/

@@ -126,20 +126,31 @@ SELECT * FROM pg_stat_subscription;
 
 | Компонент | Назначение |
 |-----------|-----------|
-| **pg-audit-log** | PostgreSQL 18 `postgres:18` с initdb и схемой `bookings` (9 таблиц). Каждая таблица — точная копия оригинальной по именам колонок, но все типы колонок — **TEXT**. Добавлены 4 служебных колонки. |
-| **pg-audit-consumer** | Java 17 приложение, подключается к HAProxy (:5432), читает слот `audit_slot`, декодирует pgoutput v1 протокол, пишет INSERT-only строки в pg-audit-log. |
+| **pg-audit-log** | PostgreSQL 18 `postgres:18` с initdb и схемой `bookings` (9 таблиц). Каждая таблица — копия оригинальной по именам колонок и **типам** (см. `pg-audit-log/init-audit.sql`), без PK/NOT NULL/DEFAULT/ограничений. Плюс 4 служебных колонки аудита. |
+| **pg-audit-consumer** | Java 17 приложение, подключается к HAProxy (:5432), читает слот `audit_slot`, декодирует pgoutput v1 протокол, **выравнивает типы audit-таблиц по источнику** (CREATE/ALTER при первом появлении таблицы), пишет INSERT-only строки (с `CAST(? AS тип)` по колонкам) в pg-audit-log. |
 
 ### Структура audit-таблиц
 
 Каждая из 9 таблиц схемы `bookings` на pg-audit-log содержит:
 
-1. **Оригинальные колонки** — все `TEXT` (значения преобразуются в строки)
+1. **Оригинальные колонки** — типы зеркальны с мастером (`CHAR(3)`, `INTEGER`, `INTEGER[]`, `TIME`, `INTERVAL`, `TIMESTAMPTZ`, `NUMERIC(10,2)`, `BOOLEAN`, `TEXT` — см. `demo-airlines.sql`)
 2. **`id_identity BIGINT GENERATED ALWAYS AS IDENTITY`** — уникальный автоинкрементный ID
 3. **`movedate DATE DEFAULT CURRENT_DATE`** — дата вставки
 4. **`moveusername TEXT DEFAULT 'wal_consumer'`** — источник изменения (всегда 'wal_consumer') ⚠️ см. «Известные ограничения»
 5. **`moveaction TEXT`** — тип операции: `'i'` (INSERT), `'u'` (UPDATE), `'d'` (DELETE)
 
-**Нет PK, UK, FK, CHECK, DEFAULT, NOT NULL, UNIQUE, индексов** — audit-таблицы только для вставки, без ограничений целостности.
+**Нет PK, UK, FK, CHECK, NOT NULL, UNIQUE, индексов** (кроме DEFAULT для служебных колонок аудита) — audit-таблицы только для вставки, без ограничений целостности.
+
+### Автоматическое выравнивание типов (pg-audit-consumer)
+
+Consumer не доверяет локальной схеме: при первом появлении таблицы в WAL-потоке он читает типы колонок из **источника** (`pg_catalog.format_type`) и приводит audit-таблицу к ним:
+
+- таблицы нет в audit-БД → `CREATE TABLE` с зеркальными типами (NULLable) + 4 служебных колонки;
+- тип колонки отличается (например, унаследованная `TEXT` от старой версии) → `ALTER COLUMN ... TYPE ... USING (col::тип)` — существующие данные конвертируются;
+- колонка появилась на мастере → `ADD COLUMN` с зеркальным типом;
+- таблица удалена на мастере → изменения пропускаются с WARN (не зацикливается на исторических записях WAL).
+
+DML-INSERT'ы строятся с явными кастами по колонкам (`CAST(? AS INTEGER)` и т.п.), так что строковые WAL-значения ('11100', '2026-10-19 20:12:42.978273+00') попадают в реальные типы, а не в TEXT. Выравнивание выполняется один раз на lifespan процесса consumer (кэш SQL на таблицу).
 
 ### Как работает WAL consumer (pg-audit-consumer)
 
@@ -165,10 +176,11 @@ Commit
 Превращается в 2 INSERT-строки:
 ```sql
 INSERT INTO "bookings"."airplanes_data" ("airplane_code", "model", "range", "speed", movedate, moveusername, moveaction)
-VALUES ('773', 'Boeing 777-300ER', '11100', '905', CURRENT_DATE, 'wal_consumer', 'i');
+VALUES (CAST(? AS character(3)), CAST(? AS text), CAST(? AS integer), CAST(? AS integer), CURRENT_DATE, 'wal_consumer', 'i');
+-- ('773', 'Boeing 777-300ER', 11100, 905) — значения передаются строками и конвертируются в реальные типы
 
 INSERT INTO "bookings"."bookings" ("book_ref", "book_date", "total_amount", movedate, moveusername, moveaction)
-VALUES ('ABC123', '2026-07-01', '25000.00', CURRENT_DATE, 'wal_consumer', 'u');
+VALUES (CAST(? AS character(6)), CAST(? AS timestamp with time zone), CAST(? AS numeric(10,2)), CURRENT_DATE, 'wal_consumer', 'u');
 ```
 
 ### Настройка слота аудита
