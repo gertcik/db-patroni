@@ -267,15 +267,50 @@ docker compose up -d pg-physical-replica
    ALTER SUBSCRIPTION shop_sub ENABLE;
    ```
 2. **Слот удалён из-за `max_slot_wal_keep_size`** — если мастер хранил недостаточно WAL и слот был удалён автоматически, логическая реплика требует пересоздания подписки с `copy_data = true`.
-3. **Слот указывает на удалённый WAL** — после нескольких failover/смен TL `restart_lsn` permanent-слота может остаться на позиции, чьи WAL-сегменты уже удалены. Признак: consumer/apply worker зациклен с ошибкой `requested WAL segment ... has already been removed`; `pg_replication_slot_advance()` на этом слоте падает с той же ошибкой. Восстановление — пересоздать слот (старая позиция не читается, события между старой и новой позицией теряются):
-   ```bash
-   docker compose stop pg-audit-consumer
-   # на текущем лидере (см. patronictl list):
-   docker compose exec patroni3 psql -U postgres -d shop -c \
-     "SELECT pg_drop_replication_slot('audit_slot'); SELECT pg_create_logical_replication_slot('audit_slot','pgoutput');"
-   docker compose start pg-audit-consumer
-   ```
-   Для `shop_sub` — то же самое (`pgoutput`), либо пересоздание подписки (см. Logical replica corruption в `AGENTS.md`).
+3. **Слот указывает на удалённый WAL** — ошибка `requested WAL segment ... has already been removed`; значение сообщения и полная процедура реакции — см. раздел ниже.
+
+### Ошибка `requested WAL segment ... has already been removed`: значение и реакция
+
+Пример сообщения (в логах `pg-audit-consumer` или apply worker'а `shop_sub`):
+
+```
+ERROR: requested WAL segment 000000070000000100000028 has already been removed
+```
+
+**Что означает.** Данные НЕ повреждены — это не сбой чтения, а отказ сервера отдать слишком старый WAL. Потребитель (слот) запрашивает поток с позиции `restart_lsn`, но соответствующие WAL-сегменты уже переработаны после контрольной точки (чтобы диск не рос). Восстановить эту позицию нельзя: `pg_replication_slot_advance()` на таком слоте падает с той же ошибкой.
+
+Расшифровка имени сегмента — 24 hex-символа: первые 8 — timeline, остальные 16 — номер сегмента по 16 МБ: `000000070000000100000028` = timeline `0x00000007` (TL 7), сегмент `0x0000000128` (0x28 = 40-й сегмент, ~640 МБ WAL от начала TL). Если имя не совпадает с текущим (сравнить с `pg_walfile_name(pg_current_wal_lsn())`) или отставание слота большое — диагноз подтверждается.
+
+**Типичная причина в этом кластере:** consumer/apply worker перестал успевать (рост write rate, долгий простой контейнера) и накопил лаг, который пережил один-два failover'а: слоты permanent и живут в DCS, но после смены лидера/TL переработанный WAL оставляет протухший `restart_lsn`.
+
+**Диагностика** (на текущем лидере — `patronictl list`):
+
+```sql
+SELECT slot_name, restart_lsn, confirmed_flush_lsn, active,
+       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS restart_lag
+FROM pg_replication_slots
+WHERE slot_name IN ('audit_slot', 'shop_sub');
+```
+
+Признаки: `restart_lag` большой (сотни МБ), `active = f`, а в логах consumer'а — цикл `Reconnecting in 5000ms...` с одной и той же ошибкой.
+
+**Реакция (audit_slot):**
+
+```bash
+docker compose stop pg-audit-consumer
+# на текущем лидере:
+docker compose exec patroni1 psql -U postgres -d shop -c \
+  "SELECT pg_drop_replication_slot('audit_slot'); SELECT pg_create_logical_replication_slot('audit_slot','pgoutput');"
+docker compose start pg-audit-consumer
+```
+
+После пересоздания поток восстанавливается сам, лаг — 0 байт (проверка: слот `active = t`, запрос диагностики выше).
+
+**Реакция (shop_sub):** пересоздания слота недостаточно — реплика пропустит данные. Нужен полный resync по процедуре «Восстановление логической реплики после сбоя» (`docs/maintenance.md`); учтите, что `DROP SUBSCRIPTION` **удаляет слот `shop_sub` на паблишере** — перед пересозданием контейнера слот надо создать вручную.
+
+**Что теряется безвозвратно:** события между протухшей позицией `restart_lsn` и текущим LSN (в аудит-таблице появится «дыра» за этот период — WAL уже переработан сервером, прочитать его невозможно). Всё, что написано после пересоздания слота, реплицируется штатно.
+
+**Профилактика:** мониторить лаг логических слотов (`docs/monitoring.md` → «Логическая репликация»), не оставлять consumer остановленным часами при активном `load-generator`; при длительной высокой скорости вставок ускорять consumer (батчевая запись, `synchronous_commit = off` на приёмнике).
 
 ### Проверка слотов после failover
 

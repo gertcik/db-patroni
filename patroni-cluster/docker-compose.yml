@@ -345,6 +345,7 @@ services:
       TARGET_DB: shop
       TARGET_USER: postgres
       TARGET_PASSWORD: secret
+      AUDIT_LOG_LEVEL: "INFO"    # уровень логирования consumer (log4j2.xml): DEBUG/INFO/WARN/ERROR/OFF
     networks:
       - patroni-net
     depends_on:
@@ -355,7 +356,9 @@ services:
   # Создаёт реалистичные DML-операции (INSERT/UPDATE/DELETE) на таблицах схемы bookings.
   # Подключается к мастеру через HAProxy.
   # Работает в N потоков (настраивается):
-  #   - BookingWorker: создаёт цепочку bookings → tickets → segments → boarding_passes
+  #   - BookingWorker: батч из BATCH_BOOKINGS бронирований за ОДНУ транзакцию
+  #     (bookings → tickets → segments → boarding_passes),
+  #     TARGET_OPS_PER_SEC ограничивает суммарную скорость вставок (0 = без лимита)
   #   - FlightWorker: создаёт и обновляет статус рейсов
   #   - CancellerWorker: удаляет случайные бронирования
   #   - MassUpdater: массовые UPDATE (статусы рейсов, суммы бронирований)
@@ -368,14 +371,16 @@ services:
       DB_NAME: shop
       DB_USER: postgres
       DB_PASSWORD: secret
-      THREADS_BOOKING: "3"
-      THREADS_FLIGHT: "2"
+      THREADS_BOOKING: "12"
+      THREADS_FLIGHT: "4"
       THREADS_CANCELLER: "1"
       THREADS_MASS_UPDATER: "1"
-      POOL_MIN: "4"
-      POOL_MAX: "20"
-      SLEEP_MIN_MS: "100"
-      SLEEP_MAX_MS: "500"
+      BATCH_BOOKINGS: "10"
+      TARGET_OPS_PER_SEC: "1000"
+      POOL_MIN: "20"
+      POOL_MAX: "40"
+      SLEEP_MIN_MS: "0"
+      SLEEP_MAX_MS: "5"
       STATS_INTERVAL_SEC: "10"
       LOG_LEVEL: INFO
     networks:

@@ -29,6 +29,8 @@ def main():
     threads_flight = int(os.getenv("THREADS_FLIGHT", "2"))
     threads_canceller = int(os.getenv("THREADS_CANCELLER", "1"))
     threads_mass = int(os.getenv("THREADS_MASS_UPDATER", "1"))
+    batch_bookings = int(os.getenv("BATCH_BOOKINGS", "1"))
+    target_ops = float(os.getenv("TARGET_OPS_PER_SEC", "0"))
     pool_min = int(os.getenv("POOL_MIN", "4"))
     pool_max = int(os.getenv("POOL_MAX", "20"))
     sleep_min = float(os.getenv("SLEEP_MIN_MS", "100")) / 1000.0
@@ -42,8 +44,10 @@ def main():
     stats = Stats(interval_sec=stats_interval)
 
     threads = []
+    ops_per_worker = target_ops / threads_booking if target_ops > 0 else 0.0
     for _ in range(threads_booking):
-        w = BookingWorker(pool, stats, sleep_range=(sleep_min, sleep_max))
+        w = BookingWorker(pool, stats, sleep_range=(sleep_min, sleep_max),
+                          batch_size=batch_bookings, ops_per_sec=ops_per_worker)
         w.start()
         threads.append(w)
     for _ in range(threads_flight):
@@ -60,8 +64,10 @@ def main():
         threads.append(w)
 
     logger.info(
-        "Started %d booking, %d flight, %d canceller, %d mass-updater workers",
-        threads_booking, threads_flight, threads_canceller, threads_mass,
+        "Started %d booking (batch=%d, rate=%.1f ops/s/worker), %d flight, "
+        "%d canceller, %d mass-updater workers",
+        threads_booking, batch_bookings, ops_per_worker, threads_flight,
+        threads_canceller, threads_mass,
     )
 
     try:

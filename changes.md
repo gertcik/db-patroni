@@ -1,5 +1,97 @@
 # Changelog
 
+## 2026-10-23 — pg-physical-replica: пересборка после TL-дрейфа (TL 10 → 15) + попутно восстановление patroni2
+
+### Что случилось
+
+- `pg-physical-replica` перестал стартовать: `FATAL: requested timeline 12 does not contain minimum recovery point 1/3DFC5040 on timeline 10`. Реплика остановилась 2026-10-21 в состоянии TL 10 — с тех пор кластер пережил несколько смен timeline (на момент восстановления — TL 14+, лидер уже не patroni2): WAL-сегменты нужных форков давно переработаны. Обычная реплика вне Patroni не умеет pg_rewind — единственный путь, полный pg_basebackup по процедуре AGENTS.md.
+- При `docker compose up -d pg-physical-replica` compose пересоздал вместе с зависимостями patroni1-3; лидер patroni2 застрял в `doing crash recovery in a single user mode` на Windows bind mount (известный gotcha AGENTS.md).
+
+### Шаги восстановления
+
+1. Wipe PGDATA реплики: `docker compose rm -sf pg-physical-replica` + очистка `data/pg_physical/*` + `docker compose up -d pg-physical-replica` — entrypoint дожидается мастера и делает pg_basebackup через HAProxy (3–5 мин).
+2. Лидер patroni2 петлился в crash recovery > 2 мин → по процедуре того же gotcha: `docker compose stop patroni2` → wipe `data/pgdata2/*` → `start` → узел пересобрался (`bootstrap from leader 'patroni1'`, ~3 мин).
+3. На время простоя patroni2 кластер сам выбрал нового лидера: **patroni1 — лидер TL 15** (failover сработал без ручного вмешательства).
+
+### Результат
+
+- `patronictl list`: patroni1 — leader TL 15; patroni2/3/4_readonly — streaming, лаг 0.
+- Слоты на лидере: все 6 (patroni2/3/4_readonly + `pg_physical_replica` + `shop_sub` + `audit_slot`), все активные.
+- `pg-physical-replica` восстановлен: redo завершилось, стриминг по TL 15, отставание 0 байт (`pg_stat_replication`).
+- Аудит не задет: `audit_slot` активен, лаг 0 байт, consumer работает (на log4j).
+
+## 2026-10-23 — pg-audit-consumer: логирование через log4j 2 (INFO по умолчанию) + unit-тесты логирования
+
+### Что сделано
+
+- Все `System.out.println` / `System.err.println` (App, PgOutputDecoder, AuditWriter) заменены на log4j 2 (`LogManager.getLogger`): `[INFO]` → `logger.info`, `[ERROR]` → `logger.error` (+stack trace), `[WARN]` → `logger.warn`, per-row debug-печатей декодера (Begin/Relation/Insert/Update/Delete/Commit/Origin) → `logger.debug`. Появилось сообщение-контекст: `%d [LEVEL] %logger: %msg`.
+- Конфигурация — `src/main/resources/log4j2.xml`: Console appender (stdout), корневой уровень **INFO по умолчанию**, переопределяется env `AUDIT_LOG_LEVEL` (`${env:AUDIT_LOG_LEVEL:-INFO}`); env добавлен в сервис `pg-audit-consumer` в docker-compose.yml.
+- Заодно: hex-дамп WAL-сообщений в App (`logWalMessage`) гейтится `logger.isDebugEnabled()` — на INFO hex не строится вовсе.
+- Unit-тесты:
+  - **LoggingTest** (6): in-test CapturingAppender через log4j core API — корневой уровень по умолчанию INFO; DEBUG-события декодера логируются на DEBUG и подавляются на INFO; INFO-сообщения проходят через log4j; декодер не пишет в stdout напрямую (capture stdout, уровень OFF); hex-дамп WAL — только на DEBUG.
+  - **AppTest** (3): `sourceUrl`, fallback `env()`, дефолты `loadConfig()` без env.
+- Тесты прогнаны в контейнере `gradle:8.7-jdk17` (путь запуска: `docker run --rm -v <repo>:/app -w /app gradle:8.7-jdk17 gradle test --no-daemon`) — 26/26 зелёные. `log4j-core` добавлен и в `testImplementation` (нужен тестам: CapturingAppender, Configurator).
+- Live-проверка: пересборка образа, рестарт consumer (--no-deps) — логи в формате log4j, DEBUG-шум и hex-дампы исчезли, поток изменений продолжается (Applied … at LSN).
+
+### Изменённые файлы
+
+| Файл | Что изменено |
+|------|-------------|
+| `patroni-cluster/pg-audit-consumer/build.gradle` | Зависимости log4j-api (implementation), log4j-core (runtimeOnly + testImplementation) |
+| `patroni-cluster/pg-audit-consumer/src/main/resources/log4j2.xml` | **Новый** — Console appender, root `INFO` (env `AUDIT_LOG_LEVEL`) |
+| `patroni-cluster/pg-audit-consumer/src/main/java/com/audit/consumer/App.java` | Все println → log4j; `logWalMessage` под `isDebugEnabled()` (early return) |
+| `patroni-cluster/pg-audit-consumer/src/main/java/com/audit/consumer/PgOutputDecoder.java` | Debug-печатей декодера → `logger.debug` |
+| `patroni-cluster/pg-audit-consumer/src/main/java/com/audit/consumer/AuditWriter.java` | INFO/WARN/ERROR → log4j |
+| `patroni-cluster/pg-audit-consumer/src/test/java/com/audit/consumer/LoggingTest.java` | **Новый** — 6 тестов логирования (уровни, stdout-чистота) |
+| `patroni-cluster/pg-audit-consumer/src/test/java/com/audit/consumer/AppTest.java` | **Новый** — 3 теста хелперов App |
+| `patroni-cluster/docker-compose.yml` | env `AUDIT_LOG_LEVEL: INFO` у сервиса pg-audit-consumer |
+
+### Известный остаток
+
+- `[INFO] Applied … at LSN` печатается на каждое WAL-сообщение (фактически на каждую строку) — на INFO при высокой скорости это всё ещё заметный stdout-поток; следует троттлить до ~1/сек или печатать size>1 только при батч-флаше (см. план оптимизации consumer: кэш PreparedStatement + flush по границе транзакции).
+
+## 2026-10-23 — Протухший audit_slot: диагностика, восстановление, документация
+
+### Что сделано
+
+- Симптом: `pg-audit-consumer` зациклен (`requested WAL segment 000000070000000100000028 has already been removed`, переподключение каждые 5 с), слот `audit_slot` неактивен, `restart_lsn` отставал на 772 МБ — WAL сегментов протухшего слота переработан (established кейс AGENTS.md): lag consumer'а при 1000 op/с + несколько failover'ов/TL (6→13).
+- Восстановление по штатной процедуре: stop consumer → на лидере `pg_drop_replication_slot('audit_slot')` + `pg_create_logical_replication_slot('audit_slot','pgoutput')` (новая позиция `1/587FCCB8`) → start consumer. События между протухшим `restart_lsn` и моментом пересоздания невосстановимы (WAL удалён) — в аудит-таблицах дыра за этот период. Проверено: слот `active = t`, лаг 0 байт, поток реплицируется.
+- Документация: в `docs/replication.md` добавлен раздел «Ошибка `requested WAL segment ... has already been removed`: значение и реакция» — расшифровка имени сегмента (timeline + сегмент), значение (слот запрашивает переработанный WAL; данные не повреждены, позиция нечитаема, `pg_replication_slot_advance` тоже падает), диагностика (SQL по `restart_lag`), реакции для `audit_slot` (drop+create) и `shop_sub` (полный resync, `DROP SUBSCRIPTION` удаляет слот на паблишере), что теряется безвозвратно, профилактика (мониторинг лага слотов, не останавливать consumer надолго при активном load-generator, ускорение consumer).
+
+### Изменённые файлы
+
+| Файл | Что изменено |
+|------|-------------|
+| `docs/replication.md` | Новый подраздел «Ошибка requested WAL segment …: значение и реакция»; пункт 3 в «Когда нужно ручное вмешательство» превращён в ссылку на него |
+| Кластер (не в git) | Слот `audit_slot` пересоздан на текущем лидере (pos `1/587FCCB8`), consumer запущен |
+
+## 2026-10-21 — Разгон load-generator до ~1000 записей/с (батч-вставки вместо autocommit)
+
+### Что сделано
+
+- Причина низкой производительности: каждый INSERT = отдельный autocommit (fsync + round-trip через HAProxy), пауза 100–500 мс на цикл → 5–8 op/с.
+- BookingWorker переписан на батч: `BATCH_BOOKINGS` бронирований за ОДНУ транзакцию через `execute_values` (psycopg2.extras) — multi-row INSERT.
+- `ON CONFLICT DO NOTHING` на всех 4 таблицах — коллизии случайных `book_ref`/`ticket_no` при высокой скорости не роняют пакет.
+- Rate-limit: `TARGET_OPS_PER_SEC` (по workers_booking, 0 = без лимита) — sleep после пакета пропорционален строкам.
+- Настройки PG (мастер): `ALTER ROLE postgres SET synchronous_commit = off` (устойчиво, живёт в каталоге); `ALTER SYSTEM max_wal_size=2GB`, `checkpoint_completion_target=0.9` + `pg_reload_conf()`.
+- docker compose: после изменения env load-generator пересоздал и patroni1-3/haproxy (dependent tree) — ожидаемо, кластер перезапустился сам (TL 6→7).
+
+### Результаты верификации (2026-10-21)
+
+- Цепочка bookings: ~1000 INSERT/с суммарно (bookings ≈ 140/с, tickets/segments/boarding_passes ≈ 285/с каждый) + flights ~190 ins/300 upd/с; err/s = 0.00.
+- Физические реплики streaming, лаг ≤ 5.5 МБ; shop_sub — 6.5 КБ (apply worker успевает).
+- ⚠️ audit_slot копит лаг (~270 КБ/мин): однопоточный pg-audit-consumer медленнее 1000/с — контейнер на связи, применяется, но WAL держится слотом → при длительной работе на 1000/с диск заполнится; снижать TARGET_OPS_PER_SEC или периодически син историческую часть.
+
+### Изменённые файлы
+
+| Файл | Что изменено |
+|------|-------------|
+| `patroni-cluster/load-generator/workers/booking_worker.py` | Батч-версия: multi-row VALUES, 1 транзакция/пакет, ON CONFLICT DO NOTHING, per-worker rate-limit |
+| `patroni-cluster/load-generator/workers/base.py` | `write_batch()` (execute_values + rollback при ошибке, autocommit=False), `count_bulk()` |
+| `patroni-cluster/load-generator/main.py` | env `BATCH_BOOKINGS`, `TARGET_OPS_PER_SEC` (бюджет на worker) |
+| `patroni-cluster/docker-compose.yml` | env: THREADS_BOOKING=12, THREADS_FLIGHT=4, BATCH_BOOKINGS=10, TARGET_OPS_PER_SEC=1000, POOL 20/40, SLEEP 0–5 мс |
+| Настройки кластера (не в git) | роль postgres: `synchronous_commit=off`; мастер: `max_wal_size=2GB`, `checkpoint_completion_target=0.9` |
+
 ## 2026-10-20 — Инструкция по развёртыванию (docs/setup.md) + актуализация доков после задачи 012
 
 ### Что сделано

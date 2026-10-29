@@ -3,6 +3,7 @@ import random
 import time
 import threading
 from psycopg2 import OperationalError, InterfaceError
+from psycopg2.extras import execute_values
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,23 @@ class BaseWorker(threading.Thread):
             with cn.cursor() as cur:
                 for sql, params in statements:
                     cur.execute(sql, params)
+
+    def write_batch(self, statements):
+        """statements: список (sql, rows) — multi-row вставки в ОДНОЙ транзакции (один коммит)."""
+        with self.pool.conn() as cn:
+            try:
+                cn.autocommit = False
+                with cn.cursor() as cur:
+                    for sql, rows in statements:
+                        execute_values(cur, sql, rows, page_size=100)
+                cn.commit()
+            except Exception:
+                cn.rollback()
+                raise
+
+    def count_bulk(self, table, op, n):
+        for _ in range(n):
+            self.stats.count(table, op)
 
     def fetch_one(self, sql, params=None):
         with self.pool.conn() as cn:

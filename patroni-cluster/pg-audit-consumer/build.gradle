@@ -18,6 +18,11 @@ repositories {
 
 dependencies {
     implementation 'org.postgresql:postgresql:42.7.4'
+    // Логирование: API во время компиляции, реализация (core) — в рантайме
+    implementation 'org.apache.logging.log4j:log4j-api:2.24.3'
+    runtimeOnly 'org.apache.logging.log4j:log4j-core:2.24.3'
+    // core нужен и в тестах (CapturingAppender, Configurator)
+    testImplementation 'org.apache.logging.log4j:log4j-core:2.24.3'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
 }
 

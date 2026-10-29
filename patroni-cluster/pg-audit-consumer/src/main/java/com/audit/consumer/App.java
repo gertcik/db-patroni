@@ -1,5 +1,7 @@
 package com.audit.consumer;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.postgresql.PGConnection;
 import org.postgresql.replication.PGReplicationStream;
 
@@ -19,6 +21,8 @@ import java.util.Properties;
  */
 public class App {
 
+    private static final Logger logger = LogManager.getLogger(App.class);
+
     static final String SOURCE_URL = "jdbc:postgresql://%s:%s/%s?replication=database";
     static final long RECONNECT_DELAY_MS = 5000;
     static final long SLOT_WAIT_DELAY_MS = 3000;
@@ -29,9 +33,8 @@ public class App {
             try {
                 run(config);
             } catch (Exception e) {
-                System.err.println("[ERROR] " + e.getMessage());
-                e.printStackTrace();
-                System.err.println("[INFO] Reconnecting in " + RECONNECT_DELAY_MS + "ms...");
+                logger.error("Consumer loop failed, restarting", e);
+                logger.info("Reconnecting in {} ms", RECONNECT_DELAY_MS);
                 try { Thread.sleep(RECONNECT_DELAY_MS); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
             }
         }
@@ -60,10 +63,10 @@ public class App {
     }
 
     static void run(Config cfg) throws Exception {
-        System.out.println("[INFO] Starting WAL consumer...");
-        System.out.println("[INFO] Source: " + cfg.sourceHost + ":" + cfg.sourcePort + "/" + cfg.sourceDb);
-        System.out.println("[INFO] Slot: " + cfg.slotName);
-        System.out.println("[INFO] Target: " + cfg.targetHost + ":" + cfg.targetPort + "/" + cfg.targetDb);
+        logger.info("Starting WAL consumer");
+        logger.info("Source: {}: {}/{}", cfg.sourceHost, cfg.sourcePort, cfg.sourceDb);
+        logger.info("Slot: {}", cfg.slotName);
+        logger.info("Target: {}: {}/{}", cfg.targetHost, cfg.targetPort, cfg.targetDb);
 
         waitForSlot(cfg);
 
@@ -89,7 +92,7 @@ public class App {
                         .withSlotOption("publication_names", cfg.publicationName)
                         .start();
 
-                System.out.println("[INFO] Replication stream started from LSN: " + stream.getLastReceiveLSN());
+                logger.info("Replication stream started from LSN: {}", stream.getLastReceiveLSN());
 
                 try (stream) {
                     while (true) {
@@ -100,7 +103,7 @@ public class App {
                         var batch = decoder.getBatch();
                         if (!batch.isEmpty()) {
                             writer.writeBatch(batch);
-                            System.out.println("[INFO] Applied " + batch.size() + " changes at LSN " + stream.getLastReceiveLSN());
+                            logger.info("Applied {} changes at LSN {}", batch.size(), stream.getLastReceiveLSN());
                             batch.clear();
                         }
 
@@ -126,20 +129,23 @@ public class App {
                         sourceUrl, cfg.sourceUser, cfg.sourcePassword
                 );
             } catch (SQLException e) {
-                System.err.println("[ERROR] Cannot connect to audit target: " + e.getMessage());
-                System.out.println("[INFO] Retrying target connection in " + RECONNECT_DELAY_MS + "ms...");
+                logger.error("Cannot connect to audit target", e);
+                logger.info("Retrying target connection in {} ms", RECONNECT_DELAY_MS);
                 Thread.sleep(RECONNECT_DELAY_MS);
             }
         }
     }
 
     static void logWalMessage(ByteBuffer msg) {
+        if (!logger.isDebugEnabled()) {
+            return;
+        }
         ByteBuffer dup = msg.duplicate();
         byte[] bytes = new byte[dup.remaining()];
         dup.get(bytes);
         var hex = new StringBuilder(bytes.length * 2);
         for (byte b : bytes) hex.append(String.format("%02x", b & 0xFF));
-        System.out.println("[DEBUG] WAL msg (" + bytes.length + " bytes): " + hex);
+        logger.debug("WAL msg ({} bytes): {}", bytes.length, hex);
     }
 
     static void waitForSlot(Config cfg) throws Exception {
@@ -150,11 +156,11 @@ public class App {
                  ResultSet rs = stmt.executeQuery(
                          "SELECT 1 FROM pg_replication_slots WHERE slot_name = '" + cfg.slotName + "'")) {
                 if (rs.next()) {
-                    System.out.println("[INFO] Slot '" + cfg.slotName + "' is ready");
+                    logger.info("Slot '{}' is ready", cfg.slotName);
                     return;
                 }
             }
-            System.out.println("[INFO] Slot '" + cfg.slotName + "' not yet created by Patroni, retrying in " + SLOT_WAIT_DELAY_MS + "ms...");
+            logger.info("Slot '{}' not yet created by Patroni, retrying in {} ms", cfg.slotName, SLOT_WAIT_DELAY_MS);
             Thread.sleep(SLOT_WAIT_DELAY_MS);
         }
     }

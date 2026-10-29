@@ -7,10 +7,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 /**
  * Decodes pgoutput v1 logical replication protocol messages.
  */
 public class PgOutputDecoder {
+
+    private static final Logger logger = LogManager.getLogger(PgOutputDecoder.class);
 
     public record RelationInfo(String schema, String table, List<String> columnNames) {}
     public record Change(String schema, String table, List<String> columnNames, List<String> values, String action) {}
@@ -54,7 +59,7 @@ public class PgOutputDecoder {
         long lsn = buf.getLong();
         long endLsn = buf.getLong();
         int ts = buf.getInt();
-        System.out.println("[DEBUG] Begin: finalLsn=" + lsn + " endLsn=" + endLsn + " ts=" + ts);
+        logger.debug("Begin: finalLsn={} endLsn={} ts={}", lsn, endLsn, ts);
     }
 
     private void decodeRelation(ByteBuffer buf) {
@@ -70,7 +75,7 @@ public class PgOutputDecoder {
             buf.getInt(); buf.getInt();
         }
         relations.put(oid, new RelationInfo(schema, table, names));
-        System.out.println("[DEBUG] Relation: oid=" + oid + " " + schema + "." + table + " cols=" + names);
+        logger.debug("Relation: oid={} {}.{} cols={}", oid, schema, table, names);
     }
 
     private void decodeInsert(ByteBuffer buf) {
@@ -81,7 +86,7 @@ public class PgOutputDecoder {
         var values = decodeTuple(buf, rel.columnNames().size());
         if (values != null) {
             batch.add(new Change(rel.schema(), rel.table(), rel.columnNames(), values, "i"));
-            System.out.println("[DEBUG] Insert: " + rel.schema() + "." + rel.table() + " " + zipCols(rel.columnNames(), values));
+            logger.debug("Insert: {}.{} {}", rel.schema(), rel.table(), zipCols(rel.columnNames(), values));
         }
     }
 
@@ -94,7 +99,7 @@ public class PgOutputDecoder {
         var values = decodeTuple(buf, rel.columnNames().size());
         if (values != null) {
             batch.add(new Change(rel.schema(), rel.table(), rel.columnNames(), values, "u"));
-            System.out.println("[DEBUG] Update: " + rel.schema() + "." + rel.table() + " " + zipCols(rel.columnNames(), values));
+            logger.debug("Update: {}.{} {}", rel.schema(), rel.table(), zipCols(rel.columnNames(), values));
         }
     }
 
@@ -107,7 +112,7 @@ public class PgOutputDecoder {
         var values = decodeTuple(buf, rel.columnNames().size());
         if (values != null) {
             batch.add(new Change(rel.schema(), rel.table(), rel.columnNames(), values, "d"));
-            System.out.println("[DEBUG] Delete: " + rel.schema() + "." + rel.table() + " " + zipCols(rel.columnNames(), values));
+            logger.debug("Delete: {}.{} {}", rel.schema(), rel.table(), zipCols(rel.columnNames(), values));
         }
     }
 
@@ -175,13 +180,13 @@ public class PgOutputDecoder {
         long lsn = buf.getLong();
         long endLsn = buf.getLong();
         long ts = buf.getLong();
-        System.out.println("[DEBUG] Commit: flags=" + flags + " lsn=" + lsn + " endLsn=" + endLsn + " ts=" + ts);
+        logger.debug("Commit: flags={} lsn={} endLsn={} ts={}", flags, lsn, endLsn, ts);
     }
 
     private void decodeOrigin(ByteBuffer buf) {
         long originLsn = buf.getLong();
         String originName = readCString(buf);
-        System.out.println("[DEBUG] Origin: lsn=" + originLsn + " name=" + originName);
+        logger.debug("Origin: lsn={} name={}", originLsn, originName);
     }
 
     private String zipCols(List<String> names, List<String> values) {

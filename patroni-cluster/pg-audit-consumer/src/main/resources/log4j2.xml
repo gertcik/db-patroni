@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- По умолчанию INFO; уровень переопределяется переменной окружения AUDIT_LOG_LEVEL
+     (DEBUG / INFO / WARN / ERROR / OFF). Конфигурация найдётся по умолчанию, т.к. log4j2.xml
+     лежит в корне classpath (внутри shadowJar). -->
+<Configuration status="WARN">
+    <Appenders>
+        <Console name="stdout" target="SYSTEM_OUT">
+            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} [%-5level] %logger{1}: %msg%n"/>
+        </Console>
+    </Appenders>
+    <Loggers>
+        <Root level="${env:AUDIT_LOG_LEVEL:-INFO}">
+            <AppenderRef ref="stdout"/>
+        </Root>
+    </Loggers>
+</Configuration>

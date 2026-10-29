@@ -1,5 +1,8 @@
 package com.audit.consumer;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -23,6 +26,8 @@ import java.util.stream.Collectors;
  * real column types instead of being stored as TEXT.
  */
 public class AuditWriter implements AutoCloseable {
+
+    private static final Logger logger = LogManager.getLogger(AuditWriter.class);
 
     /** Audit metadata columns are never mirrored from the source. */
     static final Set<String> META_COLUMNS = Set.of("movedate", "moveusername", "moveaction", "id_identity");
@@ -86,7 +91,7 @@ public class AuditWriter implements AutoCloseable {
         if (srcColumns.isEmpty()) {
             // Таблица не найдена в источнике (например, уже удалена): пропускаем её изменения,
             // чтобы не зациклиться на исторических записях WAL
-            System.err.println("[WARN] Source table not found, skipping changes: " + schema + "." + table);
+            logger.warn("Source table not found, skipping changes: {}.{}", schema, table);
             skipCache.add(schema + "." + table);
             return null;
         }
@@ -102,8 +107,7 @@ public class AuditWriter implements AutoCloseable {
                     + ", moveusername TEXT DEFAULT 'wal_consumer'"
                     + ", moveaction TEXT"
                     + ", id_identity BIGINT GENERATED ALWAYS AS IDENTITY)");
-            System.out.println("[INFO] Created mirror table " + schema + "." + table
-                    + " (" + srcColumns.size() + " source columns)");
+            logger.info("Created mirror table {}.{} ({} source columns)", schema, table, srcColumns.size());
         } else {
             List<String> alter = new ArrayList<>();
             for (int i = 0; i < srcColumns.size(); i++) {
@@ -123,10 +127,9 @@ public class AuditWriter implements AutoCloseable {
                 // не блокирует выравнивание остальных колонок
                 try {
                     execDdl("ALTER TABLE " + quoteIdent(schema) + "." + quoteIdent(table) + " " + clause);
-                    System.out.println("[INFO] Aligned mirror column of " + schema + "." + table + ": " + clause);
+                    logger.info("Aligned mirror column of {}.{}: {}", schema, table, clause);
                 } catch (SQLException e) {
-                    System.err.println("[ERROR] Cannot align column of " + schema + "." + table
-                            + " (" + clause + "): " + e.getMessage());
+                    logger.error("Cannot align column of {}.{} ({}): {}", schema, table, clause, e.getMessage());
                 }
             }
         }
